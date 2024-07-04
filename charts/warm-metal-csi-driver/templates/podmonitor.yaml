@@ -1,5 +1,3 @@
-{{- if or (.Capabilities.APIVersions.Has "monitoring.coreos.com/v1") (.Capabilities.APIVersions.Has "monitoring.coreos.com/v1alpha1") }}
----
 apiVersion: monitoring.coreos.com/v1
 kind: PodMonitor
 metadata:
@@ -31,4 +29,3 @@ spec:
   selector:
     matchLabels:
     {{- include "warm-metal-csi-driver.selectorLabels" . | nindent 6 }}
-{{end}}
