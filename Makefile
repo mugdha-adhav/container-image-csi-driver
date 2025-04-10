@@ -45,7 +45,7 @@ integration:
 
 .PHONY: image
 image:
-	$(IMAGE_BUILDER) $(IMAGE_BUILD_CMD) build --platform=$(PLATFORM) -t $(REGISTRY)/csi-image:$(VERSION) --push .
+	$(IMAGE_BUILDER) $(IMAGE_BUILD_CMD) build --platform=$(PLATFORM) -t $(REGISTRY)/csi-image:$(VERSION) .
 
 .PHONY: local
 local:

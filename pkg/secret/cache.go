@@ -6,8 +6,6 @@ import (
 	"os"
 	"time"
 
-	"github.com/google/go-containerregistry/pkg/authn"
-	"github.com/google/go-containerregistry/pkg/name"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
@@ -15,53 +13,40 @@ import (
 	"k8s.io/klog/v2"
 )
 
-// DockerKeyring interface for registry authentication
-type DockerKeyring interface {
-	Lookup(image string) ([]authn.AuthConfig, bool)
-}
-
-// BasicDockerKeyring implements DockerKeyring using go-containerregistry's keychain
-type BasicDockerKeyring struct {
-	keychain authn.Keychain
-	configs  []map[string]authn.AuthConfig
-}
-
-// Store interface for managing Docker credentials
+// Store is an interface for retrieving Docker credentials.
 type Store interface {
 	GetDockerKeyring(ctx context.Context, secrets map[string]string) (DockerKeyring, error)
 }
 
 func makeDockerKeyringFromSecrets(secrets []corev1.Secret) (DockerKeyring, error) {
-	keyring := &BasicDockerKeyring{
-		keychain: authn.DefaultKeychain,
-	}
-
+	keyring := &BasicDockerKeyring{}
 	for _, secret := range secrets {
 		if len(secret.Data) == 0 {
 			continue
 		}
-		config, err := parseDockerConfigFromSecretData(byteSecretData(secret.Data))
+
+		cred, err := parseDockerConfigFromSecretData(byteSecretData(secret.Data))
 		if err != nil {
-			klog.Errorf("unable to parse secret: %v, data: %#v", err, secret)
-			continue // Skip invalid secrets instead of failing
+			klog.Errorf(`unable to parse secret %s, %#v`, err, secret)
+			return nil, err
 		}
-		keyring.configs = append(keyring.configs, config)
+
+		keyring.Add(cred)
 	}
 
 	return keyring, nil
 }
 
 func makeDockerKeyringFromMap(secretData map[string]string) (DockerKeyring, error) {
-	keyring := &BasicDockerKeyring{
-		keychain: authn.DefaultKeychain,
-	}
-
+	keyring := &BasicDockerKeyring{}
 	if len(secretData) > 0 {
-		config, err := parseDockerConfigFromSecretData(stringSecretData(secretData))
+		cred, err := parseDockerConfigFromSecretData(stringSecretData(secretData))
 		if err != nil {
+			klog.Errorf(`unable to parse secret data %s, %#v`, err, secretData)
 			return nil, err
 		}
-		keyring.configs = append(keyring.configs, config)
+
+		keyring.Add(cred)
 	}
 
 	return keyring, nil
@@ -81,113 +66,37 @@ func (b byteSecretData) Get(key string) (data []byte, existed bool) {
 type stringSecretData map[string]string
 
 func (s stringSecretData) Get(key string) (data []byte, existed bool) {
-	str, existed := s[key]
+	strings, existed := s[key]
 	if existed {
-		data = []byte(str)
+		data = []byte(strings)
 	}
+
 	return
 }
 
-func parseDockerConfigFromSecretData(data secretDataWrapper) (map[string]authn.AuthConfig, error) {
-	dockerConfigKey := ""
-	if _, ok := data.Get(corev1.DockerConfigJsonKey); ok {
-		dockerConfigKey = corev1.DockerConfigJsonKey
-	} else if _, ok := data.Get(corev1.DockerConfigKey); ok {
-		dockerConfigKey = corev1.DockerConfigKey
-	} else {
-		return map[string]authn.AuthConfig{}, nil
-	}
-
-	dockercfg, ok := data.Get(dockerConfigKey)
-	if !ok {
-		return map[string]authn.AuthConfig{}, nil
-	}
-
-	var cfg map[string]authn.AuthConfig
-	if dockerConfigKey == corev1.DockerConfigJsonKey {
-		var cfgV1 struct {
-			Auths map[string]authn.AuthConfig `json:"auths"`
-		}
-		if err := json.Unmarshal(dockercfg, &cfgV1); err == nil {
-			cfg = cfgV1.Auths
-		} else {
-			if err := json.Unmarshal(dockercfg, &cfg); err != nil {
+func parseDockerConfigFromSecretData(data secretDataWrapper) (DockerConfig, error) {
+	if dockerConfigJSONBytes, existed := data.Get(corev1.DockerConfigJsonKey); existed {
+		if len(dockerConfigJSONBytes) > 0 {
+			dockerConfigJSON := DockerConfigJSON{}
+			if err := json.Unmarshal(dockerConfigJSONBytes, &dockerConfigJSON); err != nil {
 				return nil, err
 			}
-		}
-	} else {
-		if err := json.Unmarshal(dockercfg, &cfg); err != nil {
-			return nil, err
+
+			return dockerConfigJSON.Auths, nil
 		}
 	}
 
-	return cfg, nil
-}
-
-// Lookup implements DockerKeyring interface
-func (k *BasicDockerKeyring) Lookup(image string) ([]authn.AuthConfig, bool) {
-	// First try go-containerregistry keychain
-	ref, err := name.ParseReference(image)
-	if err == nil {
-		authenticator, err := k.keychain.Resolve(ref.Context())
-		if err == nil && authenticator != authn.Anonymous {
-			auth, err := authenticator.Authorization()
-			if err == nil {
-				return []authn.AuthConfig{*auth}, true
+	if dockercfgBytes, existed := data.Get(corev1.DockerConfigKey); existed {
+		if len(dockercfgBytes) > 0 {
+			dockercfg := DockerConfig{}
+			if err := json.Unmarshal(dockercfgBytes, &dockercfg); err != nil {
+				return nil, err
 			}
+			return dockercfg, nil
 		}
 	}
 
-	// Fallback to configs from secrets
-	var matches []authn.AuthConfig
-	for _, config := range k.configs {
-		for registry, auth := range config {
-			if matchImage(registry, image) {
-				matches = append(matches, auth)
-			}
-		}
-	}
-	return matches, len(matches) > 0
-}
-
-// matchImage checks if an image matches a registry pattern
-func matchImage(pattern, image string) bool {
-	// Exact match
-	if pattern == image {
-		return true
-	}
-
-	// If pattern ends with /, it should match the registry/repository prefix
-	if len(pattern) < len(image) && pattern[len(pattern)-1] == '/' {
-		return image[:len(pattern)] == pattern
-	}
-
-	// Handle cases where the pattern is just the registry (e.g., private-registry:5000)
-	if i := len(pattern); i < len(image) && image[i] == '/' {
-		return image[:i] == pattern
-	}
-
-	return false
-}
-
-// UnionDockerKeyring allows merging multiple keyrings
-type UnionDockerKeyring []DockerKeyring
-
-// Lookup implements DockerKeyring interface for UnionDockerKeyring
-func (uk UnionDockerKeyring) Lookup(image string) ([]authn.AuthConfig, bool) {
-	for _, keyring := range uk {
-		if auth, ok := keyring.Lookup(image); ok {
-			return auth, true
-		}
-	}
-	return nil, false
-}
-
-// NewEmptyKeyring returns an empty credential keyring
-func NewEmptyKeyring() DockerKeyring {
-	return &BasicDockerKeyring{
-		keychain: authn.DefaultKeychain,
-	}
+	return nil, nil
 }
 
 type persistentKeyringGetter interface {
@@ -212,7 +121,7 @@ func (s keyringStore) GetDockerKeyring(ctx context.Context, secretData map[strin
 		return UnionDockerKeyring{preferredKeyring, daemonKeyring}, nil
 	}
 
-	return UnionDockerKeyring{daemonKeyring, NewEmptyKeyring()}, err
+	return UnionDockerKeyring{daemonKeyring, NewDockerKeyring()}, err
 }
 
 type secretFetcher struct {
@@ -228,7 +137,7 @@ func (f secretFetcher) Fetch(ctx context.Context) ([]corev1.Secret, error) {
 		return nil, err
 	}
 
-	secrets := make([]corev1.Secret, 0, len(sa.ImagePullSecrets))
+	secrets := make([]corev1.Secret, len(sa.ImagePullSecrets))
 	klog.V(2).Infof(
 		`got %d imagePullSecrets from the service account %s/%s`, len(sa.ImagePullSecrets), f.Namespace, f.nodePluginSA,
 	)
@@ -241,7 +150,7 @@ func (f secretFetcher) Fetch(ctx context.Context) ([]corev1.Secret, error) {
 			continue
 		}
 
-		secrets = append(secrets, *secret)
+		secrets[i] = *secret
 	}
 
 	return secrets, nil
@@ -291,12 +200,12 @@ func (s secretWOCache) Get(_ context.Context) DockerKeyring {
 }
 
 func createCacheOrDie(nodePluginSA string) Store {
-	secretFetcher := createSecretFetcher(nodePluginSA)
+	fetcher := createSecretFetcher(nodePluginSA)
 	ctx, cancel := context.WithTimeout(context.TODO(), 10*time.Second)
 	defer cancel()
 
 	var keyring DockerKeyring
-	secrets, _ := secretFetcher.Fetch(ctx)
+	secrets, _ := fetcher.Fetch(ctx)
 	keyring, _ = makeDockerKeyringFromSecrets(secrets)
 	return keyringStore{
 		persistentKeyringGetter: secretWOCache{
@@ -305,16 +214,131 @@ func createCacheOrDie(nodePluginSA string) Store {
 	}
 }
 
+// createEnhancedKeyring creates a keyring that combines K8s secrets with built-in providers
+func createEnhancedKeyring(ctx context.Context, baseKeyring DockerKeyring) DockerKeyring {
+	// Create a keyring for built-in providers (AWS ECR, etc.)
+	providerKeyring := &providerDockerKeyring{
+		providers: make([]DockerConfigProvider, 0),
+	}
+
+	// Add all registered providers to the provider keyring
+	providersMutex.Lock()
+	for name, factory := range providers {
+		provider := factory()
+		if provider != nil && provider.Enabled() {
+			klog.Infof("Using credential provider: %s", name)
+			providerKeyring.providers = append(providerKeyring.providers, provider)
+		}
+	}
+	providersMutex.Unlock()
+
+	// Return a union keyring that tries the base keyring first, then the provider keyring
+	return UnionDockerKeyring{baseKeyring, providerKeyring}
+}
+
+// createEnhancedCacheOrDie creates a store that combines K8s secrets with built-in providers and caches results
+func createEnhancedCacheOrDie(nodePluginSA string) Store {
+	fetcher := createSecretFetcher(nodePluginSA)
+	ctx, cancel := context.WithTimeout(context.TODO(), 10*time.Second)
+	defer cancel()
+
+	// Get base keyring from k8s secrets
+	baseSecrets, _ := fetcher.Fetch(ctx)
+	baseKeyring, _ := makeDockerKeyringFromSecrets(baseSecrets)
+
+	// Create enhanced keyring with provider support
+	enhancedKeyring := createEnhancedKeyring(ctx, baseKeyring)
+
+	// Wrap in a store
+	return keyringStore{
+		persistentKeyringGetter: secretWOCache{
+			daemonKeyring: enhancedKeyring,
+		},
+	}
+}
+
+// createEnhancedFetcherOrDie creates a store that combines K8s secrets with built-in providers
+func createEnhancedFetcherOrDie(nodePluginSA string) Store {
+	return &enhancedFetcherStore{
+		secretFetcher: createSecretFetcher(nodePluginSA),
+	}
+}
+
+// enhancedFetcherStore is a Store that combines secrets with built-in providers
+type enhancedFetcherStore struct {
+	secretFetcher *secretFetcher
+}
+
+// GetDockerKeyring returns a keyring combining secrets and built-in providers
+func (s *enhancedFetcherStore) GetDockerKeyring(ctx context.Context, secretData map[string]string) (DockerKeyring, error) {
+	var preferredKeyring DockerKeyring
+	if len(secretData) > 0 {
+		var err error
+		preferredKeyring, err = makeDockerKeyringFromMap(secretData)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	// Get base keyring from k8s secrets
+	baseKeyring := s.secretFetcher.Get(ctx)
+
+	// Create enhanced keyring with provider support
+	enhancedKeyring := createEnhancedKeyring(ctx, baseKeyring)
+
+	// Combine with preferred keyring if provided
+	if preferredKeyring != nil {
+		return UnionDockerKeyring{preferredKeyring, enhancedKeyring}, nil
+	}
+
+	return enhancedKeyring, nil
+}
+
+// providerDockerKeyring is a DockerKeyring implementation that uses credential providers
+type providerDockerKeyring struct {
+	providers []DockerConfigProvider
+}
+
+// Lookup implements DockerKeyring
+func (dk *providerDockerKeyring) Lookup(image string) ([]AuthConfig, bool) {
+	// Try each provider
+	for _, provider := range dk.providers {
+		dockerConfig := provider.Provide(image)
+		if len(dockerConfig) > 0 {
+			var authConfigs []AuthConfig
+
+			// Convert each entry in the DockerConfig to an AuthConfig
+			for registry, entry := range dockerConfig {
+				authConfigs = append(authConfigs, AuthConfig{
+					Username: entry.Username,
+					Password: entry.Password,
+					Auth:     entry.Auth,
+				})
+				klog.V(4).Infof("Found credentials for %s using provider", registry)
+			}
+
+			return authConfigs, len(authConfigs) > 0
+		}
+	}
+
+	return nil, false
+}
+
+// CreateStoreOrDie creates a credential store for container registry authentication.
+// The credentials are fetched from the ServiceAccount of the driver pod.
 func CreateStoreOrDie(pluginConfigFile, pluginBinDir, nodePluginSA string, enableCache bool) Store {
+	// Support for dynamic plugin registration (if configured)
 	if len(pluginConfigFile) > 0 && len(pluginBinDir) > 0 {
-		// The k8s.io/kubernetes/pkg/credentialprovider API is different
-		// We'll use the built-in keyring for now since plugin support changed
-		// credentialprovider.SetPreferredDockercfgPath(pluginConfigFile)
+		klog.Infof("Registering credential provider plugins using config %s and binary dir %s", pluginConfigFile, pluginBinDir)
+		if err := RegisterCredentialProviderPlugins(pluginConfigFile, pluginBinDir); err != nil {
+			klog.Errorf("Failed to register credential provider plugins: %v", err)
+		}
 	}
 
+	// Create a store with SA secrets plus built-in providers like ECR
 	if enableCache {
-		return createCacheOrDie(nodePluginSA)
+		return createEnhancedCacheOrDie(nodePluginSA)
+	} else {
+		return createEnhancedFetcherOrDie(nodePluginSA)
 	}
-
-	return createFetcherOrDie(nodePluginSA)
 }

@@ -1,0 +1,36 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  generateName: warm-metal-csi-ecr-test-
+  namespace: kube-system
+spec:
+  template:
+    metadata:
+      labels:
+        CUSTOM_TAGS_INDENT_16: SET
+    spec:
+      restartPolicy: Never
+      imagePullSecrets:
+        - name: artifactory-secret
+      containers:
+      - name: ecr-test
+        image: busybox:glibc
+        imagePullPolicy: Always
+        volumeMounts:
+        - name: ecr-volume
+          mountPath: /mountedImage
+        command: [sh, -c]
+        args:
+        - |
+          set -ex
+          ls -la /mountedImage
+          test -d /mountedImage || exit 1
+          echo "ECR volume mounted successfully"
+      volumes:
+      - name: ecr-volume
+        csi:
+          driver: csi-image.warm-metal.tech
+          volumeAttributes:
+            image: "672327909798.dkr.ecr.us-east-1.amazonaws.com/warm-metal/ecr-test-image:1.0"
+            imagePullPolicy: Always
+  backoffLimit: 0
