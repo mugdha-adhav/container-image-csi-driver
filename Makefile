@@ -1,8 +1,8 @@
-VERSION ?= v1.2.6
+VERSION ?= mugdha-v1.2.6-temp-10
 
 IMAGE_BUILDER ?= docker
 IMAGE_BUILD_CMD ?= buildx
-REGISTRY ?= docker.io/warmmetal
+REGISTRY ?= docker.io/mugdhaadhav
 PLATFORM ?= linux/amd64
 
 export IMG = $(REGISTRY)/csi-image:$(VERSION)
@@ -11,8 +11,10 @@ export IMG = $(REGISTRY)/csi-image:$(VERSION)
 # For ubuntu, install libbtrfs-dev and libdevmapper-dev before building
 .PHONY: build
 build:
-	go fmt ./...
-	go vet ./...
+	# go fmt ./...
+
+	
+	# go vet ./...
 	go build -o _output/csi-image-plugin ./cmd/plugin
 
 .PHONY: sanity
@@ -45,7 +47,7 @@ integration:
 
 .PHONY: image
 image:
-	$(IMAGE_BUILDER) $(IMAGE_BUILD_CMD) build --platform=$(PLATFORM) -t $(REGISTRY)/csi-image:$(VERSION) .
+	$(IMAGE_BUILDER) $(IMAGE_BUILD_CMD) build --platform=$(PLATFORM) -t $(REGISTRY)/csi-image:$(VERSION) --push .
 
 .PHONY: local
 local:

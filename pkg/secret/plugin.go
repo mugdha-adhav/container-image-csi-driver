@@ -110,27 +110,35 @@ func RegisterCredentialProviderPlugins(configFilePath, executableDir string) err
 }
 
 // GetCredentialFromPlugin attempts to get credentials from registered plugins
-// for the given image.
 func GetCredentialFromPlugin(image string) (*AuthConfig, error) {
 	registeredPluginsLock.RLock()
 	defer registeredPluginsLock.RUnlock()
 
+	klog.V(2).Infof("Getting credentials from plugins for image: %s", image)
+	klog.V(2).Infof("Number of registered plugins: %d", len(registeredPlugins))
+
 	if len(registeredPlugins) == 0 {
+		klog.V(2).Info("No credential provider plugins registered")
 		return nil, nil
 	}
 
 	// For simplicity, we'll try each registered plugin
-	for _, plugin := range registeredPlugins {
+	for name, plugin := range registeredPlugins {
+		klog.V(2).Infof("Trying plugin %s for image %s", name, image)
 		auth, err := callPlugin(plugin, image)
-		if err == nil && auth != nil {
+		if err != nil {
+			klog.V(2).Infof("Plugin %s failed: %v", name, err)
+			continue
+		}
+		if auth != nil {
+			klog.V(2).Infof("Plugin %s returned credentials with username: %s", name, auth.Username)
+			klog.V(2).Infof("Auth token length: %d", len(auth.Password))
 			return auth, nil
 		}
-
-		if err != nil {
-			klog.Warningf("Failed to get credentials from plugin %s for image %s: %v", plugin.Name, image, err)
-		}
+		klog.V(2).Infof("Plugin %s returned no credentials", name)
 	}
 
+	klog.V(2).Info("No credentials found from any plugin")
 	return nil, nil
 }
 
@@ -138,6 +146,7 @@ func GetCredentialFromPlugin(image string) (*AuthConfig, error) {
 func callPlugin(plugin PluginConfig, image string) (*AuthConfig, error) {
 	// Check if this is a docker credential helper (naming convention: docker-credential-*)
 	if strings.HasPrefix(filepath.Base(plugin.Executable), "docker-credential-") {
+		klog.V(2).Infof("Executing docker credential helper: %s for image %s", plugin.Name, image)
 		// Docker credential helpers expect the server URL on stdin and use "get" command
 		cmd := exec.Command(plugin.Executable, "get")
 
@@ -146,6 +155,8 @@ func callPlugin(plugin PluginConfig, image string) (*AuthConfig, error) {
 		if err != nil {
 			return nil, fmt.Errorf("failed to extract server URL from image %s: %w", image, err)
 		}
+
+		klog.V(2).Infof("Using server URL: %s", serverURL)
 
 		// Set up pipes for stdin/stdout/stderr
 		stdin, err := cmd.StdinPipe()
@@ -185,6 +196,10 @@ func callPlugin(plugin PluginConfig, image string) (*AuthConfig, error) {
 
 		// Get output from stdout
 		output := []byte(stdout.String())
+		klog.V(2).Infof("Plugin %s raw output length: %d", plugin.Name, len(output))
+		if len(output) > 0 {
+			klog.V(2).Infof("Plugin %s first 20 chars of output: %s", plugin.Name, string(output)[:min(20, len(output))])
+		}
 
 		// Parse Docker credential helper output format
 		var creds struct {
@@ -196,6 +211,11 @@ func callPlugin(plugin PluginConfig, image string) (*AuthConfig, error) {
 			return nil, fmt.Errorf("failed to parse plugin %s output: %w", plugin.Name, err)
 		}
 
+		klog.V(2).Infof("Parsed credentials - Username: %s, Secret length: %d", creds.Username, len(creds.Secret))
+		if len(creds.Secret) > 0 {
+			klog.V(2).Infof("First 20 chars of secret: %s", creds.Secret[:min(20, len(creds.Secret))])
+		}
+
 		return &AuthConfig{
 			Username: creds.Username,
 			Password: creds.Secret,
@@ -205,6 +225,8 @@ func callPlugin(plugin PluginConfig, image string) (*AuthConfig, error) {
 		cmd := exec.Command(plugin.Executable)
 		cmd.Args = append(cmd.Args, plugin.Args...)
 		cmd.Args = append(cmd.Args, "--image="+image)
+
+		klog.V(2).Infof("Executing custom credential plugin: %s for image %s", plugin.Name, image)
 
 		// Set environment variables
 		cmd.Env = os.Environ()
@@ -227,6 +249,11 @@ func callPlugin(plugin PluginConfig, image string) (*AuthConfig, error) {
 			return nil, fmt.Errorf("failed to execute plugin %s: %w (stderr: %s)", plugin.Name, err, stderrOutput)
 		}
 
+		klog.V(2).Infof("Plugin %s raw output length: %d", plugin.Name, len(output))
+		if len(output) > 0 {
+			klog.V(2).Infof("Plugin %s first 20 chars of output: %s", plugin.Name, string(output)[:min(20, len(output))])
+		}
+
 		// Parse the output
 		var response struct {
 			Auth *AuthConfig `json:"auth"`
@@ -238,8 +265,25 @@ func callPlugin(plugin PluginConfig, image string) (*AuthConfig, error) {
 			return nil, fmt.Errorf("failed to parse plugin %s output: %w", plugin.Name, err)
 		}
 
+		if response.Auth != nil {
+			klog.V(2).Infof("Parsed auth - Username: %s, Password length: %d",
+				response.Auth.Username, len(response.Auth.Password))
+			if len(response.Auth.Password) > 0 {
+				klog.V(2).Infof("First 20 chars of password: %s",
+					response.Auth.Password[:min(20, len(response.Auth.Password))])
+			}
+		}
+
 		return response.Auth, nil
 	}
+}
+
+// min returns the smaller of x or y
+func min(x, y int) int {
+	if x < y {
+		return x
+	}
+	return y
 }
 
 // extractServerURL extracts the server/registry URL from an image reference

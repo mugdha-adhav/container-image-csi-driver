@@ -94,20 +94,23 @@ func (dk *BasicDockerKeyring) Lookup(image string) ([]AuthConfig, bool) {
 	}
 
 	if registryURL == "" {
-		klog.V(4).Infof("No registry URL found for image: %s", image)
+		klog.V(2).Infof("No registry URL found for image: %s", image)
 		return nil, false
 	}
 
-	klog.V(4).Infof("Looking up credentials for registry: %s from image: %s", registryURL, image)
+	klog.V(2).Infof("Looking up credentials for registry: %s from image: %s", registryURL, image)
+	klog.V(2).Infof("Number of credential configs available: %d", len(dk.Configs))
 
 	var matches []AuthConfig
-	for _, cfg := range dk.Configs {
+	for i, cfg := range dk.Configs {
+		klog.V(2).Infof("Checking config %d with registries: %v", i, getRegistryKeys(cfg))
 		if auth, found := matchRegistry(cfg, registryURL); found {
-			klog.V(4).Infof("Found credentials for registry: %s", registryURL)
+			klog.V(2).Infof("Found matching credentials for %s with username: %s", registryURL, auth.Username)
 			matches = append(matches, auth)
 		}
 	}
 
+	klog.V(2).Infof("Found %d matching credential(s) for %s", len(matches), registryURL)
 	return matches, len(matches) > 0
 }
 
