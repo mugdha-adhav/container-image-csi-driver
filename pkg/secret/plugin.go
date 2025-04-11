@@ -1,6 +1,7 @@
 package secret
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -8,8 +9,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-
-	"encoding/base64"
 
 	cri "k8s.io/cri-api/pkg/apis/runtime/v1"
 	"k8s.io/klog/v2"
@@ -45,6 +44,14 @@ type EnvVar struct {
 	Name string `json:"name"`
 	// Value of the environment variable.
 	Value string `json:"value,omitempty"`
+}
+
+// DockerCredentialHelperOutput represents the output format from docker-credential-helper tools
+// See: https://github.com/docker/docker-credential-helpers/blob/master/credentials/credentials.go
+type DockerCredentialHelperOutput struct {
+	ServerURL string `json:"ServerURL"`
+	Username  string `json:"Username"`
+	Secret    string `json:"Secret"`
 }
 
 var (
@@ -117,190 +124,279 @@ func GetCredentialFromPlugin(image string) (*cri.AuthConfig, error) {
 	registeredPluginsLock.RLock()
 	defer registeredPluginsLock.RUnlock()
 
-	klog.V(2).Infof("Getting credentials from plugins for image: %s", image)
-	klog.V(2).Infof("Number of registered plugins: %d", len(registeredPlugins))
+	klog.V(4).Infof("Looking for credentials from plugins for image: %s", image)
 
 	if len(registeredPlugins) == 0 {
-		klog.V(2).Info("No credential provider plugins registered")
+		klog.V(4).Info("No credential provider plugins registered")
 		return nil, nil
 	}
 
-	// For simplicity, we'll try each registered plugin
+	// Try each registered plugin
 	for name, plugin := range registeredPlugins {
-		klog.V(2).Infof("Trying plugin %s for image %s", name, image)
-		auth, err := callPlugin(plugin, image)
+		klog.V(4).Infof("Trying credential plugin %s for image %s", name, image)
+
+		var auth *cri.AuthConfig
+		var err error
+
+		// Handle different plugin types
+		if isDockerCredentialHelper(plugin.Executable) {
+			auth, err = callDockerCredentialHelper(plugin, image)
+		} else {
+			auth, err = callCustomPlugin(plugin, image)
+		}
+
 		if err != nil {
 			klog.V(2).Infof("Plugin %s failed: %v", name, err)
 			continue
 		}
+
 		if auth != nil {
-			klog.V(2).Infof("Plugin %s returned credentials with username: %s", name, auth.Username)
-			klog.V(2).Infof("Auth token length: %d", len(auth.Password))
+			klog.V(3).Infof("Plugin %s returned valid credentials for image", name)
 			return auth, nil
 		}
-		klog.V(2).Infof("Plugin %s returned no credentials", name)
 	}
 
-	klog.V(2).Info("No credentials found from any plugin")
+	klog.V(4).Infof("No credentials found from any plugin for image %s", image)
 	return nil, nil
 }
 
-// callPlugin executes the specified plugin to get credentials.
-func callPlugin(plugin PluginConfig, image string) (*cri.AuthConfig, error) {
-	// Check if this is a docker credential helper (naming convention: docker-credential-*)
-	if strings.HasPrefix(filepath.Base(plugin.Executable), "docker-credential-") {
-		klog.V(2).Infof("Executing docker credential helper: %s for image %s", plugin.Name, image)
-		// Docker credential helpers expect the server URL on stdin and use "get" command
-		cmd := exec.Command(plugin.Executable, "get")
+// isDockerCredentialHelper determines if the executable is a Docker credential helper
+func isDockerCredentialHelper(executable string) bool {
+	return strings.HasPrefix(filepath.Base(executable), "docker-credential-")
+}
 
-		// Extract server URL from image
-		serverURL, err := extractServerURL(image)
-		if err != nil {
-			return nil, fmt.Errorf("failed to extract server URL from image %s: %w", image, err)
-		}
+// isECRCredentialHelper determines if the executable is the AWS ECR credential helper
+func isECRCredentialHelper(executable string) bool {
+	base := filepath.Base(executable)
+	return strings.HasSuffix(base, "ecr-login") || strings.Contains(base, "ecr-credential-helper")
+}
 
-		klog.V(2).Infof("Using server URL: %s", serverURL)
+// callDockerCredentialHelper executes a Docker-style credential helper
+// See: https://github.com/docker/docker-credential-helpers/blob/master/credentials/credentials.go
+func callDockerCredentialHelper(plugin PluginConfig, image string) (*cri.AuthConfig, error) {
+	klog.V(4).Infof("Executing Docker credential helper: %s for image %s", plugin.Name, image)
 
-		// Set up pipes for stdin/stdout/stderr
-		stdin, err := cmd.StdinPipe()
-		if err != nil {
-			return nil, fmt.Errorf("failed to create stdin pipe for plugin %s: %w", plugin.Name, err)
-		}
+	// Extract server URL from image
+	serverURL, err := extractServerURL(image)
+	if err != nil {
+		return nil, fmt.Errorf("failed to extract server URL from image %s: %w", image, err)
+	}
 
-		var stdout, stderr strings.Builder
-		cmd.Stdout = &stdout
-		cmd.Stderr = &stderr
+	// Docker credential helpers expect the server URL without https:// prefix
+	inputURL := strings.TrimPrefix(serverURL, "https://")
+	klog.V(4).Infof("Using server URL for credential lookup: %s", inputURL)
 
-		// Set environment variables
-		cmd.Env = os.Environ()
-		for _, env := range plugin.Env {
-			cmd.Env = append(cmd.Env, fmt.Sprintf("%s=%s", env.Name, env.Value))
-		}
+	// Handle ECR-specific environment setup
+	isECRHelper := isECRCredentialHelper(plugin.Executable)
+	if isECRHelper {
+		enrichECREnvironment(plugin.Name, &plugin, serverURL)
+	}
 
-		// Start the command
-		if err := cmd.Start(); err != nil {
-			return nil, fmt.Errorf("failed to start plugin %s: %w", plugin.Name, err)
-		}
-
-		// Write server URL to stdin - strip https:// prefix as docker credential helpers expect bare domain
-		inputURL := strings.TrimPrefix(serverURL, "https://")
-		if _, err := stdin.Write([]byte(inputURL + "\n")); err != nil {
-			return nil, fmt.Errorf("failed to write to stdin of plugin %s: %w", plugin.Name, err)
-		}
-		stdin.Close()
-
-		// Wait for the command to complete
-		if err := cmd.Wait(); err != nil {
-			stderrOutput := stderr.String()
-			if stderrOutput != "" {
-				klog.Errorf("Plugin %s stderr output: %s", plugin.Name, stderrOutput)
+	// Execute the credential helper with get command
+	output, stdErr, err := executeCredentialHelper(plugin, inputURL)
+	if err != nil {
+		// Check for common credential helper errors
+		if stdErr != "" {
+			if strings.Contains(stdErr, "credentials not found") ||
+				strings.Contains(stdErr, "not found") {
+				klog.V(4).Infof("Plugin %s: no credentials found for %s", plugin.Name, inputURL)
+				return nil, nil
 			}
-			return nil, fmt.Errorf("failed to execute plugin %s: %w (stderr: %s)", plugin.Name, err, stderrOutput)
+			// Only log stderr at higher verbosity level for real errors
+			klog.V(2).Infof("Plugin %s stderr output: %s", plugin.Name, stdErr)
 		}
+		return nil, fmt.Errorf("failed to execute plugin %s: %w", plugin.Name, err)
+	}
 
-		// Get output from stdout
-		output := []byte(stdout.String())
-		klog.V(2).Infof("Plugin %s raw output length: %d", plugin.Name, len(output))
-		if len(output) > 0 {
-			klog.V(2).Infof("Plugin %s first 20 chars of output: %s", plugin.Name, string(output)[:min(20, len(output))])
+	if len(output) == 0 {
+		klog.V(4).Infof("Plugin %s returned empty output", plugin.Name)
+		return nil, nil
+	}
+
+	// Parse the credential helper output
+	auth, err := parseDockerCredentialHelperOutput(plugin.Name, output, serverURL)
+	if err != nil {
+		return nil, err
+	}
+
+	return auth, nil
+}
+
+// enrichECREnvironment adds AWS-specific environment variables for ECR helpers
+// Based on: https://github.com/awslabs/amazon-ecr-credential-helper
+func enrichECREnvironment(pluginName string, plugin *PluginConfig, serverURL string) {
+	// If AWS_REGION is not set, try to extract it from the ECR URL
+	if hasEnv(plugin.Env, "AWS_REGION") || os.Getenv("AWS_REGION") != "" {
+		return // Region already set
+	}
+
+	// Try to extract region from ECR URL
+	// Format: account.dkr.ecr.region.amazonaws.com
+	if strings.Contains(serverURL, ".dkr.ecr.") && strings.Contains(serverURL, ".amazonaws.com") {
+		parts := strings.Split(strings.TrimPrefix(serverURL, "https://"), ".")
+		if len(parts) >= 4 && parts[1] == "dkr" && parts[2] == "ecr" {
+			region := parts[3]
+			klog.V(2).Infof("Extracted AWS region %s from ECR URL for plugin %s", region, pluginName)
+			plugin.Env = append(plugin.Env, EnvVar{Name: "AWS_REGION", Value: region})
 		}
-
-		klog.V(2).Infof("Bare output returned by the plugin: %s", string(output))
-
-		// Parse JSON output from ECR credential helper directly into struct we need
-		// The output format is {"ServerURL":"...","Username":"...","Secret":"..."}
-		var pluginOutput struct {
-			ServerURL string `json:"ServerURL"`
-			Username  string `json:"Username"`
-			Secret    string `json:"Secret"`
-		}
-
-		if err := json.Unmarshal(output, &pluginOutput); err != nil {
-			return nil, fmt.Errorf("failed to parse plugin %s output: %w", plugin.Name, err)
-		}
-
-		klog.V(2).Infof("Parsed credentials - Username: %s, Secret length: %d, ServerURL: %s",
-			pluginOutput.Username, len(pluginOutput.Secret), pluginOutput.ServerURL)
-
-		// Directly create and return CRI AuthConfig
-		auth := &cri.AuthConfig{
-			ServerAddress: pluginOutput.ServerURL,
-			Username:      pluginOutput.Username,
-			Password:      pluginOutput.Secret,
-		}
-
-		// Set the Auth field for ECR format (base64 encoded USERNAME:PASSWORD)
-		// This is required by ECR as mentioned in AWS documentation
-		if pluginOutput.Username != "" && pluginOutput.Secret != "" {
-			authStr := fmt.Sprintf("%s:%s", pluginOutput.Username, pluginOutput.Secret)
-			auth.Auth = base64.StdEncoding.EncodeToString([]byte(authStr))
-		}
-
-		return auth, nil
-	} else {
-		// Use the original custom plugin format (--image parameter)
-		cmd := exec.Command(plugin.Executable)
-		cmd.Args = append(cmd.Args, plugin.Args...)
-		cmd.Args = append(cmd.Args, "--image="+image)
-
-		klog.V(2).Infof("Executing custom credential plugin: %s for image %s", plugin.Name, image)
-
-		// Set environment variables
-		cmd.Env = os.Environ()
-		for _, env := range plugin.Env {
-			cmd.Env = append(cmd.Env, fmt.Sprintf("%s=%s", env.Name, env.Value))
-		}
-
-		// Set up pipes to capture stderr
-		var stderr strings.Builder
-		cmd.Stderr = &stderr
-
-		// Execute the command
-		output, err := cmd.Output()
-		if err != nil {
-			// Log the stderr output to help with debugging
-			stderrOutput := stderr.String()
-			if stderrOutput != "" {
-				klog.Errorf("Plugin %s stderr output: %s", plugin.Name, stderrOutput)
-			}
-			return nil, fmt.Errorf("failed to execute plugin %s: %w (stderr: %s)", plugin.Name, err, stderrOutput)
-		}
-
-		klog.V(2).Infof("Plugin %s raw output length: %d", plugin.Name, len(output))
-		if len(output) > 0 {
-			klog.V(2).Infof("Plugin %s first 20 chars of output: %s", plugin.Name, string(output)[:min(20, len(output))])
-		}
-
-		// Parse the output - this already returns a CRI AuthConfig directly
-		var response struct {
-			Auth *cri.AuthConfig `json:"auth"`
-		}
-
-		// Trim any leading/trailing whitespace
-		outputStr := strings.TrimSpace(string(output))
-		if err := json.Unmarshal([]byte(outputStr), &response); err != nil {
-			return nil, fmt.Errorf("failed to parse plugin %s output: %w", plugin.Name, err)
-		}
-
-		if response.Auth != nil {
-			klog.V(2).Infof("Parsed auth - Username: %s, Password length: %d",
-				response.Auth.Username, len(response.Auth.Password))
-			if len(response.Auth.Password) > 0 {
-				klog.V(2).Infof("First 20 chars of password: %s",
-					response.Auth.Password[:min(20, len(response.Auth.Password))])
-			}
-		}
-
-		return response.Auth, nil
 	}
 }
 
-// min returns the smaller of x or y
-func min(x, y int) int {
-	if x < y {
-		return x
+// hasEnv checks if an environment variable exists in the plugin environment
+func hasEnv(env []EnvVar, name string) bool {
+	for _, e := range env {
+		if e.Name == name {
+			return true
+		}
 	}
-	return y
+	return false
+}
+
+// executeCredentialHelper runs the credential helper and returns its output
+func executeCredentialHelper(plugin PluginConfig, serverURL string) ([]byte, string, error) {
+	// Docker credential helpers expect the "get" command
+	cmd := exec.Command(plugin.Executable, "get")
+
+	// Set up pipes for stdin/stdout/stderr
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return nil, "", fmt.Errorf("failed to create stdin pipe: %w", err)
+	}
+
+	var stdout, stderr strings.Builder
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	// Set environment variables
+	cmd.Env = os.Environ()
+	for _, env := range plugin.Env {
+		cmd.Env = append(cmd.Env, fmt.Sprintf("%s=%s", env.Name, env.Value))
+	}
+
+	// Start the command
+	if err := cmd.Start(); err != nil {
+		return nil, stderr.String(), fmt.Errorf("failed to start: %w", err)
+	}
+
+	// Write server URL to stdin
+	if _, err := stdin.Write([]byte(serverURL + "\n")); err != nil {
+		_ = cmd.Process.Kill() // Kill process on error
+		return nil, stderr.String(), fmt.Errorf("failed to write to stdin: %w", err)
+	}
+	stdin.Close()
+
+	// Wait for the command to complete
+	if err := cmd.Wait(); err != nil {
+		return nil, stderr.String(), err
+	}
+
+	return []byte(stdout.String()), stderr.String(), nil
+}
+
+// parseDockerCredentialHelperOutput processes the output from a Docker credential helper
+func parseDockerCredentialHelperOutput(pluginName string, output []byte, serverURL string) (*cri.AuthConfig, error) {
+	var helperOutput DockerCredentialHelperOutput
+
+	if err := json.Unmarshal(output, &helperOutput); err != nil {
+		klog.V(2).Infof("Failed to parse plugin %s output: %v", pluginName, err)
+		return nil, fmt.Errorf("failed to parse plugin %s output: %w", pluginName, err)
+	}
+
+	// Skip if no credentials were returned
+	if helperOutput.Username == "" && helperOutput.Secret == "" {
+		klog.V(4).Infof("Plugin %s returned no credentials", pluginName)
+		return nil, nil
+	}
+
+	// Create CRI AuthConfig from helper output
+	auth := &cri.AuthConfig{
+		Username: helperOutput.Username,
+		Password: helperOutput.Secret,
+	}
+
+	// Use the server URL from the plugin response if available
+	// Otherwise use the server URL we extracted from the image reference
+	if helperOutput.ServerURL != "" {
+		auth.ServerAddress = helperOutput.ServerURL
+	} else {
+		auth.ServerAddress = serverURL
+	}
+
+	// Set the Auth field (base64 encoded USERNAME:PASSWORD) as required by CRI spec
+	// See: https://github.com/containerd/containerd/blob/main/docs/cri/registry.md
+	if auth.Username != "" && auth.Password != "" {
+		authStr := fmt.Sprintf("%s:%s", auth.Username, auth.Password)
+		auth.Auth = base64.StdEncoding.EncodeToString([]byte(authStr))
+	}
+
+	klog.V(4).Infof("Plugin %s returned credentials with username: %s", pluginName, auth.Username)
+	return auth, nil
+}
+
+// callCustomPlugin executes a custom credential plugin that uses the --image parameter
+func callCustomPlugin(plugin PluginConfig, image string) (*cri.AuthConfig, error) {
+	klog.V(4).Infof("Executing custom credential plugin: %s for image %s", plugin.Name, image)
+
+	// Set up the command with args
+	cmd := exec.Command(plugin.Executable)
+	cmd.Args = append(cmd.Args, plugin.Args...)
+	cmd.Args = append(cmd.Args, "--image="+image)
+
+	// Set environment variables
+	cmd.Env = os.Environ()
+	for _, env := range plugin.Env {
+		cmd.Env = append(cmd.Env, fmt.Sprintf("%s=%s", env.Name, env.Value))
+	}
+
+	// Set up stderr capture
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+
+	// Execute the command
+	output, err := cmd.Output()
+	if err != nil {
+		stderrOutput := stderr.String()
+		if stderrOutput != "" {
+			klog.V(2).Infof("Plugin %s stderr output: %s", plugin.Name, stderrOutput)
+		}
+		return nil, fmt.Errorf("failed to execute plugin %s: %w", plugin.Name, err)
+	}
+
+	return parseCustomPluginOutput(plugin.Name, output)
+}
+
+// parseCustomPluginOutput processes the output from a custom credential plugin
+func parseCustomPluginOutput(pluginName string, output []byte) (*cri.AuthConfig, error) {
+	// Don't log output details as they may contain credentials
+	klog.V(4).Infof("Plugin %s returned output", pluginName)
+
+	// Parse the JSON output
+	var response struct {
+		Auth *cri.AuthConfig `json:"auth"`
+	}
+
+	// Trim any leading/trailing whitespace
+	outputStr := strings.TrimSpace(string(output))
+	if err := json.Unmarshal([]byte(outputStr), &response); err != nil {
+		return nil, fmt.Errorf("failed to parse plugin %s output: %w", pluginName, err)
+	}
+
+	// If no auth was returned, or it's empty
+	if response.Auth == nil {
+		klog.V(4).Infof("Plugin %s returned no credentials", pluginName)
+		return nil, nil
+	}
+
+	// Add Auth field if not already set (base64 encoded USERNAME:PASSWORD)
+	if response.Auth.Auth == "" && response.Auth.Username != "" && response.Auth.Password != "" {
+		authStr := fmt.Sprintf("%s:%s", response.Auth.Username, response.Auth.Password)
+		response.Auth.Auth = base64.StdEncoding.EncodeToString([]byte(authStr))
+	}
+
+	klog.V(4).Infof("Plugin %s returned credentials with username: %s",
+		pluginName, response.Auth.Username)
+
+	return response.Auth, nil
 }
 
 // extractServerURL extracts the server/registry URL from an image reference
@@ -308,8 +404,11 @@ func min(x, y int) int {
 // would return "https://672327909798.dkr.ecr.us-east-1.amazonaws.com"
 func extractServerURL(image string) (string, error) {
 	// Handle image references with and without tags/digests
-	// Format: [registry/]repository[:tag][@digest]
-	parts := strings.Split(image, "/")
+	// First handle ":" for tags and "@" for digests
+	imagePart := strings.Split(strings.Split(image, "@")[0], ":")[0]
+
+	// Format: [registry/]repository
+	parts := strings.Split(imagePart, "/")
 	if len(parts) == 1 {
 		// No registry specified, assume Docker Hub
 		return "https://index.docker.io", nil
