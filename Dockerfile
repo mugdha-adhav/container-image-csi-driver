@@ -16,4 +16,25 @@ FROM alpine:3.21.3
 RUN apk add --no-cache btrfs-progs-dev lvm2-dev
 WORKDIR /
 COPY --from=builder /go/src/container-image-csi-driver/_output/csi-image-plugin /usr/bin/
+
+# Create directory for credential provider
+RUN mkdir -p /opt/image-credential-providers
+
+# Copy the local ECR credential helper binary
+COPY bin/docker-credential-ecr-login /opt/image-credential-providers/docker-credential-ecr-login
+RUN chmod +x /opt/image-credential-providers/docker-credential-ecr-login
+
+# Create credential provider configuration file
+RUN echo '{ \
+    "kind": "CredentialProviderConfig", \
+    "apiVersion": "credentialprovider.kubelet.k8s.io/v1", \
+    "providers": [ \
+      { \
+        "name": "docker-credential-ecr-login", \
+        "apiVersion": "credentialprovider.kubelet.k8s.io/v1", \
+        "args": [] \
+      } \
+    ] \
+  }' > /opt/image-credential-providers/config.json
+
 ENTRYPOINT ["csi-image-plugin"]

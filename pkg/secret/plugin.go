@@ -136,33 +136,134 @@ func GetCredentialFromPlugin(image string) (*AuthConfig, error) {
 
 // callPlugin executes the specified plugin to get credentials.
 func callPlugin(plugin PluginConfig, image string) (*AuthConfig, error) {
-	// Prepare the command
-	cmd := exec.Command(plugin.Executable)
-	cmd.Args = append(cmd.Args, plugin.Args...)
-	cmd.Args = append(cmd.Args, "--image="+image)
+	// Check if this is a docker credential helper (naming convention: docker-credential-*)
+	if strings.HasPrefix(filepath.Base(plugin.Executable), "docker-credential-") {
+		// Docker credential helpers expect the server URL on stdin and use "get" command
+		cmd := exec.Command(plugin.Executable, "get")
 
-	// Set environment variables
-	cmd.Env = os.Environ()
-	for _, env := range plugin.Env {
-		cmd.Env = append(cmd.Env, fmt.Sprintf("%s=%s", env.Name, env.Value))
+		// Extract server URL from image
+		serverURL, err := extractServerURL(image)
+		if err != nil {
+			return nil, fmt.Errorf("failed to extract server URL from image %s: %w", image, err)
+		}
+
+		// Set up pipes for stdin/stdout/stderr
+		stdin, err := cmd.StdinPipe()
+		if err != nil {
+			return nil, fmt.Errorf("failed to create stdin pipe for plugin %s: %w", plugin.Name, err)
+		}
+
+		var stdout, stderr strings.Builder
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+
+		// Set environment variables
+		cmd.Env = os.Environ()
+		for _, env := range plugin.Env {
+			cmd.Env = append(cmd.Env, fmt.Sprintf("%s=%s", env.Name, env.Value))
+		}
+
+		// Start the command
+		if err := cmd.Start(); err != nil {
+			return nil, fmt.Errorf("failed to start plugin %s: %w", plugin.Name, err)
+		}
+
+		// Write server URL to stdin
+		if _, err := stdin.Write([]byte(serverURL + "\n")); err != nil {
+			return nil, fmt.Errorf("failed to write to stdin of plugin %s: %w", plugin.Name, err)
+		}
+		stdin.Close()
+
+		// Wait for the command to complete
+		if err := cmd.Wait(); err != nil {
+			stderrOutput := stderr.String()
+			if stderrOutput != "" {
+				klog.Errorf("Plugin %s stderr output: %s", plugin.Name, stderrOutput)
+			}
+			return nil, fmt.Errorf("failed to execute plugin %s: %w (stderr: %s)", plugin.Name, err, stderrOutput)
+		}
+
+		// Get output from stdout
+		output := []byte(stdout.String())
+
+		// Parse Docker credential helper output format
+		var creds struct {
+			Username string `json:"Username"`
+			Secret   string `json:"Secret"`
+		}
+
+		if err := json.Unmarshal(output, &creds); err != nil {
+			return nil, fmt.Errorf("failed to parse plugin %s output: %w", plugin.Name, err)
+		}
+
+		return &AuthConfig{
+			Username: creds.Username,
+			Password: creds.Secret,
+		}, nil
+	} else {
+		// Use the original custom plugin format (--image parameter)
+		cmd := exec.Command(plugin.Executable)
+		cmd.Args = append(cmd.Args, plugin.Args...)
+		cmd.Args = append(cmd.Args, "--image="+image)
+
+		// Set environment variables
+		cmd.Env = os.Environ()
+		for _, env := range plugin.Env {
+			cmd.Env = append(cmd.Env, fmt.Sprintf("%s=%s", env.Name, env.Value))
+		}
+
+		// Set up pipes to capture stderr
+		var stderr strings.Builder
+		cmd.Stderr = &stderr
+
+		// Execute the command
+		output, err := cmd.Output()
+		if err != nil {
+			// Log the stderr output to help with debugging
+			stderrOutput := stderr.String()
+			if stderrOutput != "" {
+				klog.Errorf("Plugin %s stderr output: %s", plugin.Name, stderrOutput)
+			}
+			return nil, fmt.Errorf("failed to execute plugin %s: %w (stderr: %s)", plugin.Name, err, stderrOutput)
+		}
+
+		// Parse the output
+		var response struct {
+			Auth *AuthConfig `json:"auth"`
+		}
+
+		// Trim any leading/trailing whitespace
+		outputStr := strings.TrimSpace(string(output))
+		if err := json.Unmarshal([]byte(outputStr), &response); err != nil {
+			return nil, fmt.Errorf("failed to parse plugin %s output: %w", plugin.Name, err)
+		}
+
+		return response.Auth, nil
+	}
+}
+
+// extractServerURL extracts the server/registry URL from an image reference
+// For example, "672327909798.dkr.ecr.us-east-1.amazonaws.com/warm-metal/ecr-test-image"
+// would return "https://672327909798.dkr.ecr.us-east-1.amazonaws.com"
+func extractServerURL(image string) (string, error) {
+	// Handle image references with and without tags/digests
+	// Format: [registry/]repository[:tag][@digest]
+	parts := strings.Split(image, "/")
+	if len(parts) == 1 {
+		// No registry specified, assume Docker Hub
+		return "https://index.docker.io", nil
 	}
 
-	// Execute the command
-	output, err := cmd.Output()
-	if err != nil {
-		return nil, fmt.Errorf("failed to execute plugin %s: %w", plugin.Name, err)
+	// Check if the first part looks like a registry (contains "." or ":")
+	if strings.ContainsAny(parts[0], ".:") {
+		// It's a registry
+		return "https://" + parts[0], nil
 	}
 
-	// Parse the output
-	var response struct {
-		Auth *AuthConfig `json:"auth"`
+	// Check if this is a Docker Hub namespaced repository
+	if len(parts) >= 2 && !strings.ContainsAny(parts[0], ".:") {
+		return "https://index.docker.io", nil
 	}
 
-	// Trim any leading/trailing whitespace
-	outputStr := strings.TrimSpace(string(output))
-	if err := json.Unmarshal([]byte(outputStr), &response); err != nil {
-		return nil, fmt.Errorf("failed to parse plugin %s output: %w", plugin.Name, err)
-	}
-
-	return response.Auth, nil
+	return "", fmt.Errorf("could not extract server URL from image: %s", image)
 }

@@ -214,114 +214,73 @@ func createCacheOrDie(nodePluginSA string) Store {
 	}
 }
 
-// createEnhancedKeyring creates a keyring that combines K8s secrets with built-in providers
-func createEnhancedKeyring(ctx context.Context, baseKeyring DockerKeyring) DockerKeyring {
-	// Create a keyring for built-in providers (AWS ECR, etc.)
-	providerKeyring := &providerDockerKeyring{
-		providers: make([]DockerConfigProvider, 0),
+// Note: Built-in cloud providers (ECR, ACR, GCR) have been removed
+// Only Kubernetes secrets and external credential provider plugins are supported now
+
+// pluginDockerKeyring is a DockerKeyring implementation that uses credential provider plugins
+type pluginDockerKeyring struct{}
+
+// Lookup implements DockerKeyring
+func (dk *pluginDockerKeyring) Lookup(image string) ([]AuthConfig, bool) {
+	auth, err := GetCredentialFromPlugin(image)
+	if err != nil {
+		klog.Warningf("Error getting credentials from plugin for image %s: %v", image, err)
+		return nil, false
 	}
 
-	// Add all registered providers to the provider keyring
-	providersMutex.Lock()
-	for name, factory := range providers {
-		provider := factory()
-		if provider != nil && provider.Enabled() {
-			klog.Infof("Using credential provider: %s", name)
-			providerKeyring.providers = append(providerKeyring.providers, provider)
-		}
+	if auth != nil {
+		klog.V(2).Infof("Found credentials for image %s using credential provider plugin", image)
+		return []AuthConfig{*auth}, true
 	}
-	providersMutex.Unlock()
 
-	// Return a union keyring that tries the base keyring first, then the provider keyring
-	return UnionDockerKeyring{baseKeyring, providerKeyring}
+	return nil, false
 }
 
-// createEnhancedCacheOrDie creates a store that combines K8s secrets with built-in providers and caches results
-func createEnhancedCacheOrDie(nodePluginSA string) Store {
-	fetcher := createSecretFetcher(nodePluginSA)
-	ctx, cancel := context.WithTimeout(context.TODO(), 10*time.Second)
-	defer cancel()
-
-	// Get base keyring from k8s secrets
-	baseSecrets, _ := fetcher.Fetch(ctx)
-	baseKeyring, _ := makeDockerKeyringFromSecrets(baseSecrets)
-
-	// Create enhanced keyring with provider support
-	enhancedKeyring := createEnhancedKeyring(ctx, baseKeyring)
-
-	// Wrap in a store
-	return keyringStore{
-		persistentKeyringGetter: secretWOCache{
-			daemonKeyring: enhancedKeyring,
-		},
-	}
+// createPluginBasedKeyring creates a new keyring that uses credential provider plugins
+func createPluginBasedKeyring() DockerKeyring {
+	return &pluginDockerKeyring{}
 }
 
-// createEnhancedFetcherOrDie creates a store that combines K8s secrets with built-in providers
-func createEnhancedFetcherOrDie(nodePluginSA string) Store {
-	return &enhancedFetcherStore{
-		secretFetcher: createSecretFetcher(nodePluginSA),
-	}
+// combinedKeyringStore combines Kubernetes secrets with plugin-based credentials
+type combinedKeyringStore struct {
+	secretKeyring persistentKeyringGetter
 }
 
-// enhancedFetcherStore is a Store that combines secrets with built-in providers
-type enhancedFetcherStore struct {
-	secretFetcher *secretFetcher
-}
-
-// GetDockerKeyring returns a keyring combining secrets and built-in providers
-func (s *enhancedFetcherStore) GetDockerKeyring(ctx context.Context, secretData map[string]string) (DockerKeyring, error) {
+// GetDockerKeyring combines Kubernetes secrets with plugin-based credentials
+func (s combinedKeyringStore) GetDockerKeyring(ctx context.Context, secretData map[string]string) (keyring DockerKeyring, err error) {
 	var preferredKeyring DockerKeyring
 	if len(secretData) > 0 {
-		var err error
 		preferredKeyring, err = makeDockerKeyringFromMap(secretData)
 		if err != nil {
 			return nil, err
 		}
 	}
 
-	// Get base keyring from k8s secrets
-	baseKeyring := s.secretFetcher.Get(ctx)
+	secretKeyring := s.secretKeyring.Get(ctx)
+	pluginKeyring := createPluginBasedKeyring()
 
-	// Create enhanced keyring with provider support
-	enhancedKeyring := createEnhancedKeyring(ctx, baseKeyring)
+	// Create a union keyring that checks:
+	// 1. Preferred keyring (from volume context)
+	// 2. Kubernetes secrets (from service account)
+	// 3. Credential provider plugins
+	combinedKeyring := UnionDockerKeyring{secretKeyring, pluginKeyring}
 
-	// Combine with preferred keyring if provided
 	if preferredKeyring != nil {
-		return UnionDockerKeyring{preferredKeyring, enhancedKeyring}, nil
+		return UnionDockerKeyring{preferredKeyring, combinedKeyring}, nil
 	}
 
-	return enhancedKeyring, nil
+	return combinedKeyring, nil
 }
 
-// providerDockerKeyring is a DockerKeyring implementation that uses credential providers
-type providerDockerKeyring struct {
-	providers []DockerConfigProvider
-}
+// createCombinedStoreOrDie creates a store that combines K8s secrets with plugins
+func createCombinedStoreOrDie(nodePluginSA string) Store {
+	// Get base keyring getter from k8s secrets
+	secretFetcher := createSecretFetcher(nodePluginSA)
 
-// Lookup implements DockerKeyring
-func (dk *providerDockerKeyring) Lookup(image string) ([]AuthConfig, bool) {
-	// Try each provider
-	for _, provider := range dk.providers {
-		dockerConfig := provider.Provide(image)
-		if len(dockerConfig) > 0 {
-			var authConfigs []AuthConfig
-
-			// Convert each entry in the DockerConfig to an AuthConfig
-			for registry, entry := range dockerConfig {
-				authConfigs = append(authConfigs, AuthConfig{
-					Username: entry.Username,
-					Password: entry.Password,
-					Auth:     entry.Auth,
-				})
-				klog.V(4).Infof("Found credentials for %s using provider", registry)
-			}
-
-			return authConfigs, len(authConfigs) > 0
-		}
+	// Wrap in a combined store
+	return combinedKeyringStore{
+		secretKeyring: secretFetcher,
 	}
-
-	return nil, false
 }
 
 // CreateStoreOrDie creates a credential store for container registry authentication.
@@ -333,12 +292,15 @@ func CreateStoreOrDie(pluginConfigFile, pluginBinDir, nodePluginSA string, enabl
 		if err := RegisterCredentialProviderPlugins(pluginConfigFile, pluginBinDir); err != nil {
 			klog.Errorf("Failed to register credential provider plugins: %v", err)
 		}
+
+		// Use combined store with plugin support
+		return createCombinedStoreOrDie(nodePluginSA)
 	}
 
-	// Create a store with SA secrets plus built-in providers like ECR
+	// If no plugin config is provided, fall back to just Kubernetes secrets
 	if enableCache {
-		return createEnhancedCacheOrDie(nodePluginSA)
+		return createCacheOrDie(nodePluginSA)
 	} else {
-		return createEnhancedFetcherOrDie(nodePluginSA)
+		return createFetcherOrDie(nodePluginSA)
 	}
 }

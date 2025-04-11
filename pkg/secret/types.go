@@ -4,7 +4,6 @@ package secret
 import (
 	"strings"
 	"sync"
-	"time"
 
 	"k8s.io/klog/v2"
 )
@@ -40,55 +39,6 @@ type DockerConfigProvider interface {
 	Enabled() bool
 	// Provide returns a DockerConfig for the given image
 	Provide(image string) DockerConfig
-}
-
-// credentialsCache caches credentials for a period of time
-type credentialsCache struct {
-	cacheTimeout time.Duration
-	mutex        *sync.RWMutex
-	cache        map[string]cachedCredentials
-}
-
-// cachedCredentials holds cached credentials and their expiration time
-type cachedCredentials struct {
-	credentials DockerConfig
-	expiration  time.Time
-}
-
-// get retrieves credentials from the cache if they haven't expired
-func (c *credentialsCache) get(key string) (DockerConfig, bool) {
-	if c.cache == nil {
-		return DockerConfig{}, false
-	}
-
-	c.mutex.RLock()
-	defer c.mutex.RUnlock()
-
-	cachedCred, found := c.cache[key]
-	if !found {
-		return DockerConfig{}, false
-	}
-
-	if time.Now().After(cachedCred.expiration) {
-		return DockerConfig{}, false
-	}
-
-	return cachedCred.credentials, true
-}
-
-// set stores credentials in the cache with an expiration time
-func (c *credentialsCache) set(key string, credentials DockerConfig) {
-	if c.cache == nil {
-		c.cache = make(map[string]cachedCredentials)
-	}
-
-	c.mutex.Lock()
-	defer c.mutex.Unlock()
-
-	c.cache[key] = cachedCredentials{
-		credentials: credentials,
-		expiration:  time.Now().Add(c.cacheTimeout),
-	}
 }
 
 // DockerConfigEntry represents a registry entry in the DockerConfig.

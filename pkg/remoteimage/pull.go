@@ -109,6 +109,8 @@ func (p puller) Pull(ctx context.Context) (err error) {
 	repo := p.ImageWithoutTag()
 	imageSpec := &cri.ImageSpec{Image: p.ImageWithTag()}
 	authConfigs, withCredentials := p.keyring.Lookup(repo)
+	klog.Infof("authConfigs setup: %v for image %s", authConfigs, p.ImageWithTag())
+
 	if !withCredentials {
 		_, err = p.imageSvc.PullImage(ctx, &cri.PullImageRequest{
 			Image: imageSpec,

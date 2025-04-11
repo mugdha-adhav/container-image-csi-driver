@@ -4,10 +4,19 @@ runtime:
 kubeletRoot: /var/lib/kubelet
 snapshotRoot: /var/lib/containerd/io.containerd.snapshotter.v1.overlayfs
 logLevel: 4
-enableDaemonImageCredentialCache:
+enableDaemonImageCredentialCache: true
 enableAsyncPull: false
 asyncPullTimeout: "10m"
 pullImageSecretForDaemonset:
+
+# Image credential provider settings
+imageCredentialProvider:
+  # Enable the image credential provider
+  enabled: false
+  # Path to the credential provider plugin config file
+  configPath: "/etc/kubernetes/image-credential-providers/config.json"
+  # Path to the directory containing credential provider plugin binaries
+  binDir: "/etc/kubernetes/image-credential-providers"
 
 csiPlugin:
   hostNetwork: false
