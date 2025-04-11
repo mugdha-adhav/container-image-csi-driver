@@ -5,12 +5,13 @@ import (
 	"strings"
 	"sync"
 
+	cri "k8s.io/cri-api/pkg/apis/runtime/v1"
 	"k8s.io/klog/v2"
 )
 
 // DockerConfig represents the config file used by the docker CLI.
 // This allows users to authenticate with multiple registries.
-type DockerConfig map[string]DockerConfigEntry
+type DockerConfig map[string]cri.AuthConfig
 
 // DockerConfigProviderFactory is a function that returns a DockerConfigProvider
 type DockerConfigProviderFactory func(opts ...DockerConfigProviderOpts) DockerConfigProvider
@@ -41,14 +42,6 @@ type DockerConfigProvider interface {
 	Provide(image string) DockerConfig
 }
 
-// DockerConfigEntry represents a registry entry in the DockerConfig.
-type DockerConfigEntry struct {
-	Username string `json:"username,omitempty"`
-	Password string `json:"password,omitempty"`
-	Email    string `json:"email,omitempty"`
-	Auth     string `json:"auth,omitempty"`
-}
-
 // DockerConfigJSON represents the new docker config format that includes
 // credential helper configs.
 type DockerConfigJSON struct {
@@ -58,21 +51,13 @@ type DockerConfigJSON struct {
 // DockerKeyring tracks a set of docker registry credentials.
 type DockerKeyring interface {
 	// Lookup returns the registry credentials for the specified image.
-	Lookup(image string) ([]AuthConfig, bool)
+	Lookup(image string) ([]*cri.AuthConfig, bool)
 }
 
 // BasicDockerKeyring is a trivial implementation of DockerKeyring that simply
 // wraps a map of registry credentials.
 type BasicDockerKeyring struct {
 	Configs []DockerConfig
-}
-
-// AuthConfig contains authorization information for a container registry.
-type AuthConfig struct {
-	Username      string `json:"username,omitempty"`
-	Password      string `json:"password,omitempty"`
-	Auth          string `json:"auth,omitempty"`
-	RegistryToken string `json:"registrytoken,omitempty"`
 }
 
 // UnionDockerKeyring is a keyring that consists of multiple keyrings.
@@ -84,7 +69,7 @@ func (dk *BasicDockerKeyring) Add(cfg DockerConfig) {
 }
 
 // Lookup implements DockerKeyring.
-func (dk *BasicDockerKeyring) Lookup(image string) ([]AuthConfig, bool) {
+func (dk *BasicDockerKeyring) Lookup(image string) ([]*cri.AuthConfig, bool) {
 	// Strip any tag/digest from the image name - we don't include this
 	// when matching against the credentials.
 	var registryURL string
@@ -101,7 +86,7 @@ func (dk *BasicDockerKeyring) Lookup(image string) ([]AuthConfig, bool) {
 	klog.V(2).Infof("Looking up credentials for registry: %s from image: %s", registryURL, image)
 	klog.V(2).Infof("Number of credential configs available: %d", len(dk.Configs))
 
-	var matches []AuthConfig
+	var matches []*cri.AuthConfig
 	for i, cfg := range dk.Configs {
 		klog.V(2).Infof("Checking config %d with registries: %v", i, getRegistryKeys(cfg))
 		if auth, found := matchRegistry(cfg, registryURL); found {
@@ -115,8 +100,8 @@ func (dk *BasicDockerKeyring) Lookup(image string) ([]AuthConfig, bool) {
 }
 
 // Lookup implements DockerKeyring.
-func (dk UnionDockerKeyring) Lookup(image string) ([]AuthConfig, bool) {
-	var authConfigs []AuthConfig
+func (dk UnionDockerKeyring) Lookup(image string) ([]*cri.AuthConfig, bool) {
+	var authConfigs []*cri.AuthConfig
 	found := false
 
 	// Lookup in all keyrings
@@ -137,81 +122,66 @@ func (dk UnionDockerKeyring) Lookup(image string) ([]AuthConfig, bool) {
 // Helper function to split the image name into registry and repository parts
 func splitImageName(imageName string) []string {
 	// Parse the image name to extract the registry
-	// Example: edge.jfrog.ais.acquia.io/devops-pipeline-dev/kaas-container-image-csi/hello-world:linux
-	// Should extract: edge.jfrog.ais.acquia.io
-
-	// Split by slash to get registry
-	parts := strings.SplitN(imageName, "/", 2)
+	parts := strings.Split(imageName, "/")
 	if len(parts) < 2 {
-		return []string{imageName} // No slash, return as is
+		return []string{"docker.io"} // Default to docker hub
 	}
 
-	registry := parts[0]
-
-	// Check if this is a hostname (contains dots)
-	if strings.Contains(registry, ".") || strings.Contains(registry, ":") {
-		return []string{registry}
-	} else {
-		// If no dots, it's likely Docker Hub with an implicit registry
-		return []string{"docker.io"}
+	// Check if this is a hostname (contains dots or port)
+	if strings.Contains(parts[0], ".") || strings.Contains(parts[0], ":") {
+		return []string{parts[0]}
 	}
+
+	// Docker Hub with implicit registry
+	return []string{"docker.io"}
 }
 
 // Helper function to match a registry URL against the Docker config
-func matchRegistry(cfg DockerConfig, registryURL string) (AuthConfig, bool) {
+func matchRegistry(cfg DockerConfig, registryURL string) (*cri.AuthConfig, bool) {
 	klog.V(4).Infof("Matching registry URL: %s against config entries: %v", registryURL, getRegistryKeys(cfg))
 
 	// Direct match first
 	if entry, ok := cfg[registryURL]; ok {
 		klog.V(4).Infof("Found direct match for %s", registryURL)
-		return AuthConfig{
-			Username:      entry.Username,
-			Password:      entry.Password,
-			Auth:          entry.Auth,
-			RegistryToken: "", // Not stored in the DockerConfigEntry
-		}, true
+		// Create copy to avoid modifying the original
+		auth := entry
+		auth.ServerAddress = registryURL
+		return &auth, true
 	}
 
-	// Try with https:// prefix (some configs store it this way)
+	// Try with https:// prefix
 	httpsRegistry := "https://" + registryURL
 	if entry, ok := cfg[httpsRegistry]; ok {
 		klog.V(4).Infof("Found match with https:// prefix for %s", registryURL)
-		return AuthConfig{
-			Username:      entry.Username,
-			Password:      entry.Password,
-			Auth:          entry.Auth,
-			RegistryToken: "",
-		}, true
+		// Create copy to avoid modifying the original
+		auth := entry
+		auth.ServerAddress = registryURL
+		return &auth, true
 	}
 
 	// Try with http:// prefix
 	httpRegistry := "http://" + registryURL
 	if entry, ok := cfg[httpRegistry]; ok {
 		klog.V(4).Infof("Found match with http:// prefix for %s", registryURL)
-		return AuthConfig{
-			Username:      entry.Username,
-			Password:      entry.Password,
-			Auth:          entry.Auth,
-			RegistryToken: "",
-		}, true
+		// Create copy to avoid modifying the original
+		auth := entry
+		auth.ServerAddress = registryURL
+		return &auth, true
 	}
 
-	// Try to find a partial match (useful for JFrog Artifactory where registry might be stored differently)
+	// Try to find a partial match
 	for registry, entry := range cfg {
 		if strings.Contains(registryURL, registry) || strings.Contains(registry, registryURL) {
 			klog.V(4).Infof("Found partial match: config has %s, image uses %s", registry, registryURL)
-			return AuthConfig{
-				Username:      entry.Username,
-				Password:      entry.Password,
-				Auth:          entry.Auth,
-				RegistryToken: "",
-			}, true
+			// Create copy to avoid modifying the original
+			auth := entry
+			auth.ServerAddress = registryURL
+			return &auth, true
 		}
 	}
 
-	// No match found
 	klog.V(4).Infof("No credential match found for %s", registryURL)
-	return AuthConfig{}, false
+	return nil, false
 }
 
 // Helper function to get registry keys for logging

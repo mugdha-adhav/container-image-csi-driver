@@ -9,6 +9,9 @@ import (
 	"strings"
 	"sync"
 
+	"encoding/base64"
+
+	cri "k8s.io/cri-api/pkg/apis/runtime/v1"
 	"k8s.io/klog/v2"
 )
 
@@ -110,7 +113,7 @@ func RegisterCredentialProviderPlugins(configFilePath, executableDir string) err
 }
 
 // GetCredentialFromPlugin attempts to get credentials from registered plugins
-func GetCredentialFromPlugin(image string) (*AuthConfig, error) {
+func GetCredentialFromPlugin(image string) (*cri.AuthConfig, error) {
 	registeredPluginsLock.RLock()
 	defer registeredPluginsLock.RUnlock()
 
@@ -143,7 +146,7 @@ func GetCredentialFromPlugin(image string) (*AuthConfig, error) {
 }
 
 // callPlugin executes the specified plugin to get credentials.
-func callPlugin(plugin PluginConfig, image string) (*AuthConfig, error) {
+func callPlugin(plugin PluginConfig, image string) (*cri.AuthConfig, error) {
 	// Check if this is a docker credential helper (naming convention: docker-credential-*)
 	if strings.HasPrefix(filepath.Base(plugin.Executable), "docker-credential-") {
 		klog.V(2).Infof("Executing docker credential helper: %s for image %s", plugin.Name, image)
@@ -179,8 +182,9 @@ func callPlugin(plugin PluginConfig, image string) (*AuthConfig, error) {
 			return nil, fmt.Errorf("failed to start plugin %s: %w", plugin.Name, err)
 		}
 
-		// Write server URL to stdin
-		if _, err := stdin.Write([]byte(serverURL + "\n")); err != nil {
+		// Write server URL to stdin - strip https:// prefix as docker credential helpers expect bare domain
+		inputURL := strings.TrimPrefix(serverURL, "https://")
+		if _, err := stdin.Write([]byte(inputURL + "\n")); err != nil {
 			return nil, fmt.Errorf("failed to write to stdin of plugin %s: %w", plugin.Name, err)
 		}
 		stdin.Close()
@@ -201,25 +205,38 @@ func callPlugin(plugin PluginConfig, image string) (*AuthConfig, error) {
 			klog.V(2).Infof("Plugin %s first 20 chars of output: %s", plugin.Name, string(output)[:min(20, len(output))])
 		}
 
-		// Parse Docker credential helper output format
-		var creds struct {
-			Username string `json:"Username"`
-			Secret   string `json:"Secret"`
+		klog.V(2).Infof("Bare output returned by the plugin: %s", string(output))
+
+		// Parse JSON output from ECR credential helper directly into struct we need
+		// The output format is {"ServerURL":"...","Username":"...","Secret":"..."}
+		var pluginOutput struct {
+			ServerURL string `json:"ServerURL"`
+			Username  string `json:"Username"`
+			Secret    string `json:"Secret"`
 		}
 
-		if err := json.Unmarshal(output, &creds); err != nil {
+		if err := json.Unmarshal(output, &pluginOutput); err != nil {
 			return nil, fmt.Errorf("failed to parse plugin %s output: %w", plugin.Name, err)
 		}
 
-		klog.V(2).Infof("Parsed credentials - Username: %s, Secret length: %d", creds.Username, len(creds.Secret))
-		if len(creds.Secret) > 0 {
-			klog.V(2).Infof("First 20 chars of secret: %s", creds.Secret[:min(20, len(creds.Secret))])
+		klog.V(2).Infof("Parsed credentials - Username: %s, Secret length: %d, ServerURL: %s",
+			pluginOutput.Username, len(pluginOutput.Secret), pluginOutput.ServerURL)
+
+		// Directly create and return CRI AuthConfig
+		auth := &cri.AuthConfig{
+			ServerAddress: pluginOutput.ServerURL,
+			Username:      pluginOutput.Username,
+			Password:      pluginOutput.Secret,
 		}
 
-		return &AuthConfig{
-			Username: creds.Username,
-			Password: creds.Secret,
-		}, nil
+		// Set the Auth field for ECR format (base64 encoded USERNAME:PASSWORD)
+		// This is required by ECR as mentioned in AWS documentation
+		if pluginOutput.Username != "" && pluginOutput.Secret != "" {
+			authStr := fmt.Sprintf("%s:%s", pluginOutput.Username, pluginOutput.Secret)
+			auth.Auth = base64.StdEncoding.EncodeToString([]byte(authStr))
+		}
+
+		return auth, nil
 	} else {
 		// Use the original custom plugin format (--image parameter)
 		cmd := exec.Command(plugin.Executable)
@@ -254,9 +271,9 @@ func callPlugin(plugin PluginConfig, image string) (*AuthConfig, error) {
 			klog.V(2).Infof("Plugin %s first 20 chars of output: %s", plugin.Name, string(output)[:min(20, len(output))])
 		}
 
-		// Parse the output
+		// Parse the output - this already returns a CRI AuthConfig directly
 		var response struct {
-			Auth *AuthConfig `json:"auth"`
+			Auth *cri.AuthConfig `json:"auth"`
 		}
 
 		// Trim any leading/trailing whitespace

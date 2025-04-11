@@ -1,4 +1,4 @@
-VERSION ?= mugdha-v1.2.6-temp-10
+VERSION ?= mugdha-v1.2.6-temp-11
 
 IMAGE_BUILDER ?= docker
 IMAGE_BUILD_CMD ?= buildx

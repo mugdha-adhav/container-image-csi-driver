@@ -10,6 +10,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
+	cri "k8s.io/cri-api/pkg/apis/runtime/v1"
 	"k8s.io/klog/v2"
 )
 
@@ -221,7 +222,7 @@ func createCacheOrDie(nodePluginSA string) Store {
 type pluginDockerKeyring struct{}
 
 // Lookup implements DockerKeyring
-func (dk *pluginDockerKeyring) Lookup(image string) ([]AuthConfig, bool) {
+func (dk *pluginDockerKeyring) Lookup(image string) ([]*cri.AuthConfig, bool) {
 	auth, err := GetCredentialFromPlugin(image)
 	if err != nil {
 		klog.Warningf("Error getting credentials from plugin for image %s: %v", image, err)
@@ -230,7 +231,7 @@ func (dk *pluginDockerKeyring) Lookup(image string) ([]AuthConfig, bool) {
 
 	if auth != nil {
 		klog.V(2).Infof("Found credentials for image %s using credential provider plugin", image)
-		return []AuthConfig{*auth}, true
+		return []*cri.AuthConfig{auth}, true
 	}
 
 	return nil, false
