@@ -78,7 +78,7 @@ func parseLegacyDockerConfig(data []byte) (DockerConfig, error) {
 // makeDockerKeyringFromSecrets creates a keyring from a list of Kubernetes secrets
 func makeDockerKeyringFromSecrets(secrets []corev1.Secret) (DockerKeyring, error) {
 	keyring := &BasicDockerKeyring{}
-	
+
 	for _, secret := range secrets {
 		if len(secret.Data) == 0 {
 			continue
@@ -101,7 +101,7 @@ func makeDockerKeyringFromSecrets(secrets []corev1.Secret) (DockerKeyring, error
 // makeDockerKeyringFromMap creates a keyring from a map of strings (from CSI volume context)
 func makeDockerKeyringFromMap(secretData map[string]string) (DockerKeyring, error) {
 	keyring := &BasicDockerKeyring{}
-	
+
 	if len(secretData) > 0 {
 		cred, err := parseDockerConfigFromSecretData(stringSecretData(secretData))
 		if err != nil {
@@ -131,14 +131,14 @@ type credentialStore struct {
 // GetDockerKeyring returns credentials from volume context, Kubernetes secrets, and plugins
 func (s credentialStore) GetDockerKeyring(ctx context.Context, secretData map[string]string) (DockerKeyring, error) {
 	keyrings := s.collectKeyrings(ctx, secretData)
-	
+
 	return s.createUnionKeyring(keyrings), nil
 }
 
 // collectKeyrings gathers credentials from all available sources in priority order
 func (s credentialStore) collectKeyrings(ctx context.Context, secretData map[string]string) []DockerKeyring {
 	var keyrings []DockerKeyring
-	
+
 	// First check volume context (highest priority)
 	if len(secretData) > 0 {
 		volumeKeyring, err := makeDockerKeyringFromMap(secretData)
@@ -162,7 +162,7 @@ func (s credentialStore) collectKeyrings(ctx context.Context, secretData map[str
 		keyrings = append(keyrings, &pluginDockerKeyring{})
 		klog.V(3).Info("Added plugin credentials to keyring")
 	}
-	
+
 	return keyrings
 }
 
@@ -196,7 +196,7 @@ func (f secretFetcher) Fetch(ctx context.Context) ([]corev1.Secret, error) {
 		`Found %d imagePullSecrets in service account %s/%s`,
 		len(sa.ImagePullSecrets), f.Namespace, f.nodePluginSA,
 	)
-	
+
 	return f.getSecrets(ctx, sa.ImagePullSecrets)
 }
 
@@ -213,17 +213,17 @@ func (f secretFetcher) getServiceAccount(ctx context.Context) (*corev1.ServiceAc
 // getSecrets retrieves all the secrets referenced by the service account
 func (f secretFetcher) getSecrets(ctx context.Context, secretRefs []corev1.LocalObjectReference) ([]corev1.Secret, error) {
 	secrets := make([]corev1.Secret, 0, len(secretRefs))
-	
+
 	for _, ref := range secretRefs {
 		secret, err := f.Client.CoreV1().Secrets(f.Namespace).Get(ctx, ref.Name, metav1.GetOptions{})
 		if err != nil {
 			klog.Errorf(`Unable to fetch secret "%s/%s": %s`, f.Namespace, ref.Name, err)
 			continue
 		}
-		
+
 		secrets = append(secrets, *secret)
 	}
-	
+
 	return secrets, nil
 }
 
@@ -331,7 +331,7 @@ func initializeSecretFetcher(nodePluginSA string, enableCache bool) keyringProvi
 	if nodePluginSA == "" {
 		return nil
 	}
-	
+
 	// Create the basic secret fetcher
 	secretFetch, err := createSecretFetcher(nodePluginSA)
 	if err != nil {
@@ -343,7 +343,7 @@ func initializeSecretFetcher(nodePluginSA string, enableCache bool) keyringProvi
 	if enableCache {
 		return createCachedFetcher(secretFetch)
 	}
-	
+
 	klog.Info("Created dynamic secret store")
 	return secretFetch
 }
@@ -365,7 +365,7 @@ func createCachedFetcher(fetcher *secretFetcher) keyringProvider {
 		klog.Warningf("Error creating keyring from pre-fetched secrets: %v", err)
 		keyring = NewDockerKeyring()
 	}
-	
+
 	klog.Info("Created cached secret store")
 	return &cachedSecretsFetcher{cachedKeyring: keyring}
 }
@@ -378,11 +378,11 @@ func initializeCredentialPlugins(configFile, binDir string) bool {
 
 	klog.Infof("Registering credential provider plugins using config %s and binary dir %s",
 		configFile, binDir)
-		
+
 	if err := RegisterCredentialProviderPlugins(configFile, binDir); err != nil {
 		klog.Errorf("Failed to register credential provider plugins: %v", err)
 		return false
 	}
-	
+
 	return true
 }
