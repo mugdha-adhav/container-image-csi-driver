@@ -29,6 +29,7 @@ type BasicDockerKeyring struct {
 // Store interface for managing Docker credentials
 type Store interface {
 	GetDockerKeyring(ctx context.Context, secrets map[string]string) (DockerKeyring, error)
+	GetDockerKeyringForServiceAccount(ctx context.Context, secrets map[string]string, namespace, serviceAccount string) (DockerKeyring, error)
 }
 
 func makeDockerKeyringFromSecrets(secrets []corev1.Secret) (DockerKeyring, error) {
@@ -239,6 +240,7 @@ type persistentKeyringGetter interface {
 
 type keyringStore struct {
 	persistentKeyringGetter
+	client *kubernetes.Clientset
 }
 
 func (s keyringStore) GetDockerKeyring(ctx context.Context, secretData map[string]string) (keyring DockerKeyring, err error) {
@@ -256,6 +258,70 @@ func (s keyringStore) GetDockerKeyring(ctx context.Context, secretData map[strin
 	}
 
 	return UnionDockerKeyring{daemonKeyring, NewEmptyKeyring()}, err
+}
+
+func (s keyringStore) GetDockerKeyringForServiceAccount(ctx context.Context, secretData map[string]string, namespace, serviceAccount string) (keyring DockerKeyring, err error) {
+	klog.V(2).Infof("GetDockerKeyringForServiceAccount: fetching credentials for sa=%s/%s", namespace, serviceAccount)
+
+	var preferredKeyring DockerKeyring
+	if len(secretData) > 0 {
+		preferredKeyring, err = makeDockerKeyringFromMap(secretData)
+		if err != nil {
+			return nil, err
+		}
+		klog.V(2).Infof("GetDockerKeyringForServiceAccount: created keyring from inline secrets")
+	}
+
+	// Fetch imagePullSecrets from the pod's service account
+	var podSAKeyring DockerKeyring
+	if s.client != nil && namespace != "" && serviceAccount != "" {
+		sa, err := s.client.CoreV1().ServiceAccounts(namespace).Get(ctx, serviceAccount, metav1.GetOptions{})
+		if err != nil {
+			klog.Warningf("unable to fetch service account %s/%s: %s", namespace, serviceAccount, err)
+		} else {
+			secrets := make([]corev1.Secret, 0, len(sa.ImagePullSecrets))
+			klog.V(2).Infof("got %d imagePullSecrets from pod's service account %s/%s", len(sa.ImagePullSecrets), namespace, serviceAccount)
+
+			for i := range sa.ImagePullSecrets {
+				secretRef := &sa.ImagePullSecrets[i]
+				secret, err := s.client.CoreV1().Secrets(namespace).Get(ctx, secretRef.Name, metav1.GetOptions{})
+				if err != nil {
+					klog.Errorf("unable to fetch secret %s/%s: %s", namespace, secretRef.Name, err)
+					continue
+				}
+				secrets = append(secrets, *secret)
+			}
+
+			if len(secrets) > 0 {
+				podSAKeyring, err = makeDockerKeyringFromSecrets(secrets)
+				if err != nil {
+					klog.Errorf("unable to create keyring from pod SA secrets: %s", err)
+				} else {
+					klog.V(2).Infof("GetDockerKeyringForServiceAccount: created keyring from %d pod SA secrets", len(secrets))
+				}
+			}
+		}
+	}
+
+	// Get the driver's own keyring (from its service account)
+	daemonKeyring := s.Get(ctx)
+
+	// Build union keyring with precedence: inline secrets > pod SA secrets > driver SA secrets
+	keyrings := []DockerKeyring{}
+	if preferredKeyring != nil {
+		keyrings = append(keyrings, preferredKeyring)
+	}
+	if podSAKeyring != nil {
+		keyrings = append(keyrings, podSAKeyring)
+	}
+	keyrings = append(keyrings, daemonKeyring)
+
+	if len(keyrings) == 0 {
+		keyrings = append(keyrings, NewEmptyKeyring())
+	}
+
+	klog.V(2).Infof("GetDockerKeyringForServiceAccount: created union keyring with %d keyrings", len(keyrings))
+	return UnionDockerKeyring(keyrings), nil
 }
 
 type secretFetcher struct {
@@ -296,7 +362,7 @@ func (s secretFetcher) Get(ctx context.Context) DockerKeyring {
 	return keyring
 }
 
-func createSecretFetcher(nodePluginSA string) *secretFetcher {
+func createSecretFetcher(nodePluginSA string) (*secretFetcher, *kubernetes.Clientset) {
 	config, err := rest.InClusterConfig()
 	if err != nil {
 		klog.Fatalf("unable to get cluster config: %s", err)
@@ -316,12 +382,14 @@ func createSecretFetcher(nodePluginSA string) *secretFetcher {
 		Client:       clientset,
 		nodePluginSA: nodePluginSA,
 		Namespace:    string(curNamespace),
-	}
+	}, clientset
 }
 
 func createFetcherOrDie(nodePluginSA string) Store {
+	fetcher, client := createSecretFetcher(nodePluginSA)
 	return keyringStore{
-		persistentKeyringGetter: createSecretFetcher(nodePluginSA),
+		persistentKeyringGetter: fetcher,
+		client:                  client,
 	}
 }
 
@@ -334,7 +402,7 @@ func (s secretWOCache) Get(_ context.Context) DockerKeyring {
 }
 
 func createCacheOrDie(nodePluginSA string) Store {
-	secretFetcher := createSecretFetcher(nodePluginSA)
+	secretFetcher, client := createSecretFetcher(nodePluginSA)
 	ctx, cancel := context.WithTimeout(context.TODO(), 10*time.Second)
 	defer cancel()
 
@@ -345,6 +413,7 @@ func createCacheOrDie(nodePluginSA string) Store {
 		persistentKeyringGetter: secretWOCache{
 			daemonKeyring: keyring,
 		},
+		client: client,
 	}
 }
 
