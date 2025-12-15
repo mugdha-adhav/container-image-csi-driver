@@ -28,8 +28,7 @@ type BasicDockerKeyring struct {
 
 // Store interface for managing Docker credentials
 type Store interface {
-	GetDockerKeyring(ctx context.Context, secrets map[string]string) (DockerKeyring, error)
-	GetDockerKeyringForServiceAccount(ctx context.Context, secrets map[string]string, namespace, serviceAccount string) (DockerKeyring, error)
+	GetDockerKeyring(ctx context.Context, secrets map[string]string, namespace, serviceAccount string) (DockerKeyring, error)
 }
 
 func makeDockerKeyringFromSecrets(secrets []corev1.Secret) (DockerKeyring, error) {
@@ -243,25 +242,12 @@ type keyringStore struct {
 	client *kubernetes.Clientset
 }
 
-func (s keyringStore) GetDockerKeyring(ctx context.Context, secretData map[string]string) (keyring DockerKeyring, err error) {
-	var preferredKeyring DockerKeyring
-	if len(secretData) > 0 {
-		preferredKeyring, err = makeDockerKeyringFromMap(secretData)
-		if err != nil {
-			return nil, err
-		}
+func (s keyringStore) GetDockerKeyring(ctx context.Context, secretData map[string]string, namespace, serviceAccount string) (keyring DockerKeyring, err error) {
+	if namespace != "" && serviceAccount != "" {
+		klog.V(2).Infof("GetDockerKeyring: fetching credentials for pod SA %s/%s", namespace, serviceAccount)
+	} else {
+		klog.V(2).Infof("GetDockerKeyring: no pod SA info provided, using driver SA only")
 	}
-
-	daemonKeyring := s.Get(ctx)
-	if preferredKeyring != nil {
-		return UnionDockerKeyring{preferredKeyring, daemonKeyring}, nil
-	}
-
-	return UnionDockerKeyring{daemonKeyring, NewEmptyKeyring()}, err
-}
-
-func (s keyringStore) GetDockerKeyringForServiceAccount(ctx context.Context, secretData map[string]string, namespace, serviceAccount string) (keyring DockerKeyring, err error) {
-	klog.V(2).Infof("GetDockerKeyringForServiceAccount: fetching credentials for sa=%s/%s", namespace, serviceAccount)
 
 	var preferredKeyring DockerKeyring
 	if len(secretData) > 0 {
@@ -269,7 +255,7 @@ func (s keyringStore) GetDockerKeyringForServiceAccount(ctx context.Context, sec
 		if err != nil {
 			return nil, err
 		}
-		klog.V(2).Infof("GetDockerKeyringForServiceAccount: created keyring from inline secrets")
+		klog.V(2).Infof("GetDockerKeyring: created keyring from inline secrets")
 	}
 
 	// Fetch imagePullSecrets from the pod's service account
@@ -297,7 +283,7 @@ func (s keyringStore) GetDockerKeyringForServiceAccount(ctx context.Context, sec
 				if err != nil {
 					klog.Errorf("unable to create keyring from pod SA secrets: %s", err)
 				} else {
-					klog.V(2).Infof("GetDockerKeyringForServiceAccount: created keyring from %d pod SA secrets", len(secrets))
+					klog.V(2).Infof("GetDockerKeyring: created keyring from %d pod SA secrets", len(secrets))
 				}
 			}
 		}
@@ -320,7 +306,7 @@ func (s keyringStore) GetDockerKeyringForServiceAccount(ctx context.Context, sec
 		keyrings = append(keyrings, NewEmptyKeyring())
 	}
 
-	klog.V(2).Infof("GetDockerKeyringForServiceAccount: created union keyring with %d keyrings", len(keyrings))
+	klog.V(2).Infof("GetDockerKeyring: created union keyring with %d keyrings", len(keyrings))
 	return UnionDockerKeyring(keyrings), nil
 }
 
