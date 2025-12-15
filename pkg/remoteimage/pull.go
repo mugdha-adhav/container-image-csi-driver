@@ -118,16 +118,13 @@ func (p puller) Pull(ctx context.Context) (err error) {
 		return
 	}
 
-	// Extract the registry domain for setting ServerAddress in auth config
-	registryDomain := reference.Domain(p.image)
-
 	var pullErrs []error
 	for _, authConfig := range authConfigs {
+		// Don't set ServerAddress - let containerd infer it from the image reference
 		auth := &cri.AuthConfig{
 			Username:      authConfig.Username,
 			Password:      authConfig.Password,
 			Auth:          authConfig.Auth,
-			ServerAddress: registryDomain,
 			IdentityToken: authConfig.IdentityToken,
 			RegistryToken: authConfig.RegistryToken,
 		}
