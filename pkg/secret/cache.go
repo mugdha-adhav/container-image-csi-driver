@@ -92,14 +92,18 @@ func parseDockerConfigFromSecretData(data secretDataWrapper) (map[string]authn.A
 	dockerConfigKey := ""
 	if _, ok := data.Get(corev1.DockerConfigJsonKey); ok {
 		dockerConfigKey = corev1.DockerConfigJsonKey
+		klog.V(3).Infof("parseDockerConfigFromSecretData: using key=%s", dockerConfigKey)
 	} else if _, ok := data.Get(corev1.DockerConfigKey); ok {
 		dockerConfigKey = corev1.DockerConfigKey
+		klog.V(3).Infof("parseDockerConfigFromSecretData: using key=%s", dockerConfigKey)
 	} else {
+		klog.V(3).Infof("parseDockerConfigFromSecretData: no docker config key found in secret")
 		return map[string]authn.AuthConfig{}, nil
 	}
 
 	dockercfg, ok := data.Get(dockerConfigKey)
 	if !ok {
+		klog.V(3).Infof("parseDockerConfigFromSecretData: failed to get dockercfg")
 		return map[string]authn.AuthConfig{}, nil
 	}
 
@@ -110,15 +114,23 @@ func parseDockerConfigFromSecretData(data secretDataWrapper) (map[string]authn.A
 		}
 		if err := json.Unmarshal(dockercfg, &cfgV1); err == nil {
 			cfg = cfgV1.Auths
+			klog.V(3).Infof("parseDockerConfigFromSecretData: parsed config with %d registries", len(cfg))
+			for registry := range cfg {
+				klog.V(4).Infof("parseDockerConfigFromSecretData: registry=%s", registry)
+			}
 		} else {
 			if err := json.Unmarshal(dockercfg, &cfg); err != nil {
+				klog.Errorf("parseDockerConfigFromSecretData: failed to unmarshal dockercfg: %v", err)
 				return nil, err
 			}
+			klog.V(3).Infof("parseDockerConfigFromSecretData: parsed legacy config with %d registries", len(cfg))
 		}
 	} else {
 		if err := json.Unmarshal(dockercfg, &cfg); err != nil {
+			klog.Errorf("parseDockerConfigFromSecretData: failed to unmarshal legacy dockercfg: %v", err)
 			return nil, err
 		}
+		klog.V(3).Infof("parseDockerConfigFromSecretData: parsed legacy config with %d registries", len(cfg))
 	}
 
 	return cfg, nil
@@ -126,47 +138,78 @@ func parseDockerConfigFromSecretData(data secretDataWrapper) (map[string]authn.A
 
 // Lookup implements DockerKeyring interface
 func (k *BasicDockerKeyring) Lookup(image string) ([]authn.AuthConfig, bool) {
+	klog.V(3).Infof("Lookup: searching credentials for image=%s", image)
+
 	// First try go-containerregistry keychain
 	ref, err := name.ParseReference(image)
 	if err == nil {
+		klog.V(3).Infof("Lookup: parsed reference, context=%s", ref.Context())
 		authenticator, err := k.keychain.Resolve(ref.Context())
 		if err == nil && authenticator != authn.Anonymous {
 			auth, err := authenticator.Authorization()
 			if err == nil {
-				return []authn.AuthConfig{*auth}, true
+				// Verify that we actually have credentials (not just empty auth)
+				if auth.Username != "" || auth.Password != "" || auth.Auth != "" || auth.IdentityToken != "" || auth.RegistryToken != "" {
+					klog.V(2).Infof("Lookup: found credentials via go-containerregistry keychain for %s (username=%s)", image, auth.Username)
+					return []authn.AuthConfig{*auth}, true
+				}
+				klog.V(3).Infof("Lookup: go-containerregistry keychain returned empty credentials")
+			} else {
+				klog.V(3).Infof("Lookup: go-containerregistry keychain Authorization() failed: %v", err)
 			}
+		} else if err != nil {
+			klog.V(3).Infof("Lookup: go-containerregistry keychain Resolve() failed: %v", err)
+		} else {
+			klog.V(3).Infof("Lookup: go-containerregistry keychain returned Anonymous authenticator")
 		}
+	} else {
+		klog.V(3).Infof("Lookup: failed to parse reference: %v", err)
 	}
 
 	// Fallback to configs from secrets
+	klog.V(3).Infof("Lookup: falling back to configs from secrets (total configs=%d)", len(k.configs))
 	var matches []authn.AuthConfig
-	for _, config := range k.configs {
+	for i, config := range k.configs {
+		klog.V(3).Infof("Lookup: checking config #%d with %d registries", i, len(config))
 		for registry, auth := range config {
+			klog.V(3).Infof("Lookup: checking registry pattern=%s against image=%s", registry, image)
 			if matchImage(registry, image) {
+				klog.V(2).Infof("Lookup: MATCHED registry pattern=%s for image=%s (username=%s)", registry, image, auth.Username)
 				matches = append(matches, auth)
+			} else {
+				klog.V(3).Infof("Lookup: NO MATCH for registry pattern=%s against image=%s", registry, image)
 			}
 		}
 	}
+	klog.V(2).Infof("Lookup: found %d matching credentials for image=%s", len(matches), image)
 	return matches, len(matches) > 0
 }
 
 // matchImage checks if an image matches a registry pattern
 func matchImage(pattern, image string) bool {
+	klog.V(4).Infof("matchImage: pattern='%s' (len=%d), image='%s' (len=%d)", pattern, len(pattern), image, len(image))
+
 	// Exact match
 	if pattern == image {
+		klog.V(4).Infof("matchImage: exact match")
 		return true
 	}
 
 	// If pattern ends with /, it should match the registry/repository prefix
 	if len(pattern) < len(image) && pattern[len(pattern)-1] == '/' {
-		return image[:len(pattern)] == pattern
+		match := image[:len(pattern)] == pattern
+		klog.V(4).Infof("matchImage: pattern ends with /, result=%v", match)
+		return match
 	}
 
 	// Handle cases where the pattern is just the registry (e.g., private-registry:5000)
 	if i := len(pattern); i < len(image) && image[i] == '/' {
-		return image[:i] == pattern
+		match := image[:i] == pattern
+		klog.V(4).Infof("matchImage: registry match check at position %d, char='%c', image[:i]='%s', pattern='%s', result=%v", i, image[i], image[:i], pattern, match)
+		return match
 	}
 
+	klog.V(4).Infof("matchImage: no match")
 	return false
 }
 

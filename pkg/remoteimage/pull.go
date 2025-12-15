@@ -109,8 +109,10 @@ func (p puller) Pull(ctx context.Context) (err error) {
 	// Use the full repository path for credential lookup to match against registry patterns in secrets
 	repo := p.ImageWithoutTag()
 	imageSpec := &cri.ImageSpec{Image: p.ImageWithTag()}
+	klog.V(2).Infof("remoteimage.Pull: looking up credentials for repo=%s (full image=%s)", repo, p.ImageWithTag())
 	authConfigs, withCredentials := p.keyring.Lookup(repo)
 	if !withCredentials {
+		klog.V(2).Infof("remoteimage.Pull: no credentials found, pulling without auth")
 		_, err = p.imageSvc.PullImage(ctx, &cri.PullImageRequest{
 			Image: imageSpec,
 		})
@@ -119,7 +121,9 @@ func (p puller) Pull(ctx context.Context) (err error) {
 	}
 
 	var pullErrs []error
-	for _, authConfig := range authConfigs {
+	klog.V(2).Infof("remoteimage.Pull: found credentials, trying %d auth configs", len(authConfigs))
+	for i, authConfig := range authConfigs {
+		klog.V(3).Infof("remoteimage.Pull: trying auth config #%d (username=%s)", i, authConfig.Username)
 		// Don't set ServerAddress - let containerd infer it from the image reference
 		auth := &cri.AuthConfig{
 			Username:      authConfig.Username,
@@ -138,6 +142,7 @@ func (p puller) Pull(ctx context.Context) (err error) {
 			klog.V(2).Infof("remoteimage.Pull(with creds): pulling %s completed with err==nil", p.ImageWithTag())
 			return
 		}
+		klog.V(2).Infof("remoteimage.Pull: auth config #%d failed: %v", i, err)
 		pullErrs = append(pullErrs, err)
 	}
 
