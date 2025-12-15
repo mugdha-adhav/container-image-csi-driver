@@ -68,7 +68,7 @@ func (p puller) ImageSize(ctx context.Context) (size int, err error) {
 		err = fmt.Errorf("remoteimage.ImageSize(): imageStatusResponse.Image is nil")
 		return size, err
 	} else {
-		size = imageStatusResponse.Image.Size()
+		size = int(imageStatusResponse.Image.Size)
 		err = nil
 		return size, err
 	}
@@ -117,14 +117,17 @@ func (p puller) Pull(ctx context.Context) (err error) {
 		return
 	}
 
+	// Extract the registry domain from the image reference
+	registryDomain := reference.Domain(p.image)
+
 	var pullErrs []error
 	for _, authConfig := range authConfigs {
 		auth := &cri.AuthConfig{
 			Username:      authConfig.Username,
 			Password:      authConfig.Password,
 			Auth:          authConfig.Auth,
-			ServerAddress: authConfig.RegistryToken, // Using RegistryToken as ServerAddress since authConfig doesn't have a dedicated field
-			IdentityToken: authConfig.Password,      // Using Password as IdentityToken if using token auth
+			ServerAddress: registryDomain,
+			IdentityToken: authConfig.IdentityToken,
 			RegistryToken: authConfig.RegistryToken,
 		}
 
