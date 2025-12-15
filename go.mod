@@ -6,7 +6,7 @@ require (
 	github.com/BurntSushi/toml v1.5.0
 	github.com/container-storage-interface/spec v1.12.0
 	github.com/containerd/containerd/v2 v2.2.1-0.20251210152827-505478250fa0
-	github.com/containers/storage v1.59.1
+	github.com/containers/storage v1.56.0
 	github.com/distribution/reference v0.6.0
 	github.com/google/go-containerregistry v0.20.7
 	github.com/kubernetes-csi/csi-lib-utils v0.23.0
@@ -77,6 +77,8 @@ require (
 	github.com/google/go-cmp v0.7.0 // indirect
 	github.com/google/go-intervals v0.0.2 // indirect
 	github.com/google/uuid v1.6.0 // indirect
+	github.com/hashicorp/errwrap v1.1.0 // indirect
+	github.com/hashicorp/go-multierror v1.1.1 // indirect
 	github.com/json-iterator/go v1.1.12 // indirect
 	github.com/klauspost/compress v1.18.2 // indirect
 	github.com/klauspost/pgzip v1.2.6 // indirect
