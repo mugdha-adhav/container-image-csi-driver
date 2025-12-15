@@ -106,10 +106,10 @@ func (p puller) Pull(ctx context.Context) (err error) {
 		}
 	}()
 
-	// Extract the registry domain from the image reference for credential lookup
-	registryDomain := reference.Domain(p.image)
+	// Use the full repository path for credential lookup to match against registry patterns in secrets
+	repo := p.ImageWithoutTag()
 	imageSpec := &cri.ImageSpec{Image: p.ImageWithTag()}
-	authConfigs, withCredentials := p.keyring.Lookup(registryDomain)
+	authConfigs, withCredentials := p.keyring.Lookup(repo)
 	if !withCredentials {
 		_, err = p.imageSvc.PullImage(ctx, &cri.PullImageRequest{
 			Image: imageSpec,
@@ -117,6 +117,9 @@ func (p puller) Pull(ctx context.Context) (err error) {
 		klog.V(2).Infof("remoteimage.Pull(no creds): pulling %s completed with err=%v", p.ImageWithTag(), err)
 		return
 	}
+
+	// Extract the registry domain for setting ServerAddress in auth config
+	registryDomain := reference.Domain(p.image)
 
 	var pullErrs []error
 	for _, authConfig := range authConfigs {
