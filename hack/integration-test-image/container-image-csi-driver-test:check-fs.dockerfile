@@ -1,4 +1,4 @@
-FROM alpine:3
+FROM alpine:3.21
 ENV TARGET=""
 WORKDIR /
 COPY check-fs.sh /
