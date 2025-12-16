@@ -30,6 +30,9 @@ type CredentialProvider struct {
 	// Name is the required name of the credential provider. It must match the name of the
 	// provider executable in the plugin directory.
 	Name string `json:"name"`
+	// MatchImages is a list of image patterns that this provider should handle.
+	// Patterns can use wildcards like *.dkr.ecr.*.amazonaws.com
+	MatchImages []string `json:"matchImages,omitempty"`
 	// APIVersion is the preferred API version of the credential provider plugin.
 	APIVersion string `json:"apiVersion,omitempty"`
 	// Args are the optional command-line arguments to pass to the plugin.
@@ -62,11 +65,12 @@ var (
 
 // PluginConfig contains the information needed to invoke a credential provider plugin
 type PluginConfig struct {
-	Name       string
-	Executable string
-	Args       []string
-	Env        []EnvVar
-	APIVersion string
+	Name        string
+	Executable  string
+	Args        []string
+	Env         []EnvVar
+	APIVersion  string
+	MatchImages []string
 }
 
 // RegisterCredentialProviderPlugins reads the specified config file and registers
@@ -105,11 +109,12 @@ func RegisterCredentialProviderPlugins(configFilePath, executableDir string) err
 		// Register the plugin
 		registeredPluginsLock.Lock()
 		registeredPlugins[provider.Name] = PluginConfig{
-			Name:       provider.Name,
-			Executable: executable,
-			Args:       provider.Args,
-			Env:        provider.Env,
-			APIVersion: provider.APIVersion,
+			Name:        provider.Name,
+			Executable:  executable,
+			Args:        provider.Args,
+			Env:         provider.Env,
+			APIVersion:  provider.APIVersion,
+			MatchImages: provider.MatchImages,
 		}
 		registeredPluginsLock.Unlock()
 
@@ -133,6 +138,12 @@ func GetCredentialFromPlugin(image string) (*cri.AuthConfig, error) {
 
 	// Try each registered plugin
 	for name, plugin := range registeredPlugins {
+		// Check if this plugin should handle this image
+		if !matchesImagePattern(image, plugin.MatchImages) {
+			klog.V(4).Infof("Plugin %s does not match image %s, skipping", name, image)
+			continue
+		}
+
 		klog.V(4).Infof("Trying credential plugin %s for image %s", name, image)
 
 		var auth *cri.AuthConfig
@@ -158,6 +169,106 @@ func GetCredentialFromPlugin(image string) (*cri.AuthConfig, error) {
 
 	klog.V(4).Infof("No credentials found from any plugin for image %s", image)
 	return nil, nil
+}
+
+// matchesImagePattern checks if an image matches any of the provided patterns
+// Patterns can include wildcards like *.dkr.ecr.*.amazonaws.com
+func matchesImagePattern(image string, patterns []string) bool {
+	// If no patterns are specified, match all images
+	if len(patterns) == 0 {
+		klog.V(4).Infof("No match patterns specified, matching all images")
+		return true
+	}
+
+	// Extract the registry from the image
+	registry := extractRegistryFromImage(image)
+	klog.V(4).Infof("Extracted registry %s from image %s", registry, image)
+
+	// Check if the registry matches any pattern
+	for _, pattern := range patterns {
+		if matchesPattern(registry, pattern) {
+			klog.V(4).Infof("Registry %s matches pattern %s", registry, pattern)
+			return true
+		}
+	}
+
+	klog.V(4).Infof("Registry %s does not match any patterns", registry)
+	return false
+}
+
+// extractRegistryFromImage extracts just the registry hostname from an image reference
+// For example: "private-registry:5000/repo/image:tag" returns "private-registry:5000"
+func extractRegistryFromImage(image string) string {
+	// Remove tag or digest from the image
+	// Split by @ to remove digest, then by : to handle tags, but keep the first : for port
+	imageWithoutDigest := strings.Split(image, "@")[0]
+
+	// Split by / to get parts
+	parts := strings.Split(imageWithoutDigest, "/")
+	if len(parts) == 1 {
+		// No registry specified, just image name
+		return "docker.io" // Default registry
+	}
+
+	// Check if first part looks like a registry (contains . or :)
+	if strings.ContainsAny(parts[0], ".:") {
+		return parts[0]
+	}
+
+	// Docker Hub namespaced repository
+	return "docker.io"
+}
+
+// matchesPattern checks if a string matches a pattern with wildcards
+// Supports * as a wildcard for any characters
+func matchesPattern(s, pattern string) bool {
+	// Handle exact match
+	if s == pattern {
+		return true
+	}
+
+	// Handle wildcard patterns
+	return wildcardMatch(s, pattern)
+}
+
+// wildcardMatch implements simple wildcard matching with *
+// Based on https://research.swtch.com/glob
+func wildcardMatch(s, pattern string) bool {
+	// Split pattern by *
+	parts := strings.Split(pattern, "*")
+
+	// If no wildcards, must be exact match
+	if len(parts) == 1 {
+		return s == pattern
+	}
+
+	// Check if string starts with first part
+	if !strings.HasPrefix(s, parts[0]) {
+		return false
+	}
+	s = s[len(parts[0]):]
+
+	// Check if string ends with last part
+	if len(parts[len(parts)-1]) > 0 {
+		if !strings.HasSuffix(s, parts[len(parts)-1]) {
+			return false
+		}
+		s = s[:len(s)-len(parts[len(parts)-1])]
+	}
+
+	// Check middle parts
+	for i := 1; i < len(parts)-1; i++ {
+		if parts[i] == "" {
+			continue
+		}
+		idx := strings.Index(s, parts[i])
+		if idx == -1 {
+			return false
+		}
+		s = s[idx+len(parts[i]):]
+	}
+
+	return true
 }
 
 // isDockerCredentialHelper determines if the executable is a Docker credential helper

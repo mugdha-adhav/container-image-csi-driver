@@ -68,7 +68,14 @@ jobs:
             echo ""
           done
           echo ""
-          echo "=== CSI Driver Logs ==="
+          echo "=== CSI Driver Nodeplugin Logs ==="
+          for pod in $(kubectl get pods -n kube-system -l app=container-image-csi-driver -o name); do
+            echo "Logs for $pod:"
+            kubectl logs -n kube-system $pod -c csi-plugin --tail=500 || true
+            echo ""
+          done
+          echo ""
+          echo "=== CSI Driver All Container Logs ==="
           kubectl logs -n kube-system -l app=container-image-csi-driver --all-containers --tail=200 || true
           echo ""
           echo "=== Events ==="
