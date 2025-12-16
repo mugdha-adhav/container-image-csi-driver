@@ -114,6 +114,8 @@ func matchRegistry(cfg DockerConfig, registryURL string) (*cri.AuthConfig, bool)
 	// Direct match first
 	if entry, ok := cfg[registryURL]; ok {
 		klog.V(5).Infof("Found direct match for %s", registryURL)
+		klog.V(4).Infof("Credentials for %s - Username: %s, Auth field length: %d, ServerAddress will be: %s",
+			registryURL, entry.Username, len(entry.Auth), registryURL)
 		// Return pointer
 		result := &cri.AuthConfig{
 			Username:      entry.Username,

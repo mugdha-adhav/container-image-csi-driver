@@ -68,15 +68,22 @@ jobs:
             echo ""
           done
           echo ""
+          echo "=== CSI Driver Pods Status ==="
+          kubectl get pods -n kube-system -l app=container-image-csi-driver -o wide || true
+          echo ""
           echo "=== CSI Driver Nodeplugin Logs ==="
-          for pod in $(kubectl get pods -n kube-system -l app=container-image-csi-driver -o name); do
-            echo "Logs for $pod:"
-            kubectl logs -n kube-system $pod -c csi-plugin --tail=500 || true
+          kubectl get pods -n kube-system -l app=container-image-csi-driver -o name | while read pod; do
+            echo "Logs for $pod (csi-plugin container):"
+            kubectl logs -n kube-system $pod -c csi-plugin --tail=500 2>&1 || echo "Failed to get csi-plugin logs for $pod"
             echo ""
           done
           echo ""
           echo "=== CSI Driver All Container Logs ==="
-          kubectl logs -n kube-system -l app=container-image-csi-driver --all-containers --tail=200 || true
+          kubectl get pods -n kube-system -l app=container-image-csi-driver -o name | while read pod; do
+            echo "All containers for $pod:"
+            kubectl logs -n kube-system $pod --all-containers --tail=200 2>&1 || echo "Failed to get logs for $pod"
+            echo ""
+          done
           echo ""
           echo "=== Events ==="
           kubectl get events --sort-by='.lastTimestamp' -A
