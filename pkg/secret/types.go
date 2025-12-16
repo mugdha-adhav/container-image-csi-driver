@@ -2,6 +2,7 @@
 package secret
 
 import (
+	"encoding/base64"
 	"strings"
 
 	cri "k8s.io/cri-api/pkg/apis/runtime/v1"
@@ -107,6 +108,38 @@ func splitImageName(imageName string) []string {
 	return []string{"docker.io"}
 }
 
+// normalizeAuthConfig ensures that both Auth field and Username/Password fields are populated.
+// Some CRI runtimes prefer Username/Password while others use the Auth field.
+// If Auth field exists but Username/Password are empty, decode Auth to populate them.
+// If Username/Password exist but Auth is empty, encode them to populate Auth.
+func normalizeAuthConfig(auth *cri.AuthConfig) {
+	if auth == nil {
+		return
+	}
+
+	// If Auth field exists but Username/Password are empty, decode Auth
+	if auth.Auth != "" && auth.Username == "" && auth.Password == "" {
+		decoded, err := base64.StdEncoding.DecodeString(auth.Auth)
+		if err == nil {
+			parts := strings.SplitN(string(decoded), ":", 2)
+			if len(parts) == 2 {
+				auth.Username = parts[0]
+				auth.Password = parts[1]
+				klog.V(4).Infof("Decoded Auth field to populate Username/Password")
+			}
+		} else {
+			klog.V(3).Infof("Failed to decode Auth field: %v", err)
+		}
+	}
+
+	// If Username/Password exist but Auth is empty, encode them
+	if auth.Username != "" && auth.Password != "" && auth.Auth == "" {
+		authStr := auth.Username + ":" + auth.Password
+		auth.Auth = base64.StdEncoding.EncodeToString([]byte(authStr))
+		klog.V(4).Infof("Encoded Username/Password to populate Auth field")
+	}
+}
+
 // Helper function to match a registry URL against the Docker config
 func matchRegistry(cfg DockerConfig, registryURL string) (*cri.AuthConfig, bool) {
 	klog.V(5).Infof("Matching registry URL: %s", registryURL)
@@ -125,6 +158,7 @@ func matchRegistry(cfg DockerConfig, registryURL string) (*cri.AuthConfig, bool)
 			IdentityToken: entry.IdentityToken,
 			RegistryToken: entry.RegistryToken,
 		}
+		normalizeAuthConfig(result)
 		return result, true
 	}
 
@@ -140,6 +174,7 @@ func matchRegistry(cfg DockerConfig, registryURL string) (*cri.AuthConfig, bool)
 			IdentityToken: entry.IdentityToken,
 			RegistryToken: entry.RegistryToken,
 		}
+		normalizeAuthConfig(result)
 		return result, true
 	}
 
@@ -155,6 +190,7 @@ func matchRegistry(cfg DockerConfig, registryURL string) (*cri.AuthConfig, bool)
 			IdentityToken: entry.IdentityToken,
 			RegistryToken: entry.RegistryToken,
 		}
+		normalizeAuthConfig(result)
 		return result, true
 	}
 
@@ -170,6 +206,7 @@ func matchRegistry(cfg DockerConfig, registryURL string) (*cri.AuthConfig, bool)
 				IdentityToken: entry.IdentityToken,
 				RegistryToken: entry.RegistryToken,
 			}
+			normalizeAuthConfig(result)
 			return result, true
 		}
 	}
