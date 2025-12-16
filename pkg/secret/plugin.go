@@ -448,16 +448,28 @@ func parseDockerCredentialHelperOutput(pluginName string, output []byte, serverU
 func callCustomPlugin(plugin PluginConfig, image string) (*cri.AuthConfig, error) {
 	klog.V(4).Infof("Executing custom credential plugin: %s for image %s", plugin.Name, image)
 
-	// Set up the command with args
-	cmd := exec.Command(plugin.Executable)
-	cmd.Args = append(cmd.Args, plugin.Args...)
-	cmd.Args = append(cmd.Args, "--image="+image)
+	// Prepare the request JSON according to Kubernetes credential provider spec
+	request := map[string]interface{}{
+		"apiVersion": plugin.APIVersion,
+		"kind":       "CredentialProviderRequest",
+		"image":      image,
+	}
+	requestJSON, err := json.Marshal(request)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal plugin request: %w", err)
+	}
+
+	// Set up the command with configured args only (no --image flag!)
+	cmd := exec.Command(plugin.Executable, plugin.Args...)
 
 	// Set environment variables
 	cmd.Env = os.Environ()
 	for _, env := range plugin.Env {
 		cmd.Env = append(cmd.Env, fmt.Sprintf("%s=%s", env.Name, env.Value))
 	}
+
+	// Send request via stdin
+	cmd.Stdin = strings.NewReader(string(requestJSON))
 
 	// Set up stderr capture
 	var stderr strings.Builder
@@ -473,17 +485,27 @@ func callCustomPlugin(plugin PluginConfig, image string) (*cri.AuthConfig, error
 		return nil, fmt.Errorf("failed to execute plugin %s: %w", plugin.Name, err)
 	}
 
-	return parseCustomPluginOutput(plugin.Name, output)
+	return parseCredentialProviderResponse(plugin.Name, output)
 }
 
 // parseCustomPluginOutput processes the output from a custom credential plugin
 func parseCustomPluginOutput(pluginName string, output []byte) (*cri.AuthConfig, error) {
+	return parseCredentialProviderResponse(pluginName, output)
+}
+
+// parseCredentialProviderResponse parses the Kubernetes credential provider plugin response
+func parseCredentialProviderResponse(pluginName string, output []byte) (*cri.AuthConfig, error) {
 	// Don't log output details as they may contain credentials
 	klog.V(4).Infof("Plugin %s returned output", pluginName)
 
-	// Parse the JSON output
+	// Parse the Kubernetes credential provider response format
 	var response struct {
-		Auth *cri.AuthConfig `json:"auth"`
+		APIVersion string `json:"apiVersion"`
+		Kind       string `json:"kind"`
+		Auth       map[string]struct {
+			Username string `json:"username"`
+			Password string `json:"password"`
+		} `json:"auth"`
 	}
 
 	// Trim any leading/trailing whitespace
@@ -492,22 +514,29 @@ func parseCustomPluginOutput(pluginName string, output []byte) (*cri.AuthConfig,
 		return nil, fmt.Errorf("failed to parse plugin %s output: %w", pluginName, err)
 	}
 
-	// If no auth was returned, or it's empty
-	if response.Auth == nil {
+	// If no auth was returned
+	if len(response.Auth) == 0 {
 		klog.V(4).Infof("Plugin %s returned no credentials", pluginName)
 		return nil, nil
 	}
 
-	// Add Auth field if not already set (base64 encoded USERNAME:PASSWORD)
-	if response.Auth.Auth == "" && response.Auth.Username != "" && response.Auth.Password != "" {
-		authStr := fmt.Sprintf("%s:%s", response.Auth.Username, response.Auth.Password)
-		response.Auth.Auth = base64.StdEncoding.EncodeToString([]byte(authStr))
+	// Get the first (and typically only) auth entry
+	// The key is typically the registry pattern (e.g., "*.dkr.ecr.*.amazonaws.com")
+	for registry, auth := range response.Auth {
+		klog.V(4).Infof("Plugin %s returned credentials for registry pattern: %s", pluginName, registry)
+
+		// Create CRI AuthConfig with both username/password and encoded auth
+		authStr := fmt.Sprintf("%s:%s", auth.Username, auth.Password)
+		authEncoded := base64.StdEncoding.EncodeToString([]byte(authStr))
+
+		return &cri.AuthConfig{
+			Username: auth.Username,
+			Password: auth.Password,
+			Auth:     authEncoded,
+		}, nil
 	}
 
-	klog.V(4).Infof("Plugin %s returned credentials with username: %s",
-		pluginName, response.Auth.Username)
-
-	return response.Auth, nil
+	return nil, nil
 }
 
 // extractServerURL extracts the server/registry URL from an image reference
