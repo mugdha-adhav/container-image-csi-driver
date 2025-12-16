@@ -5,7 +5,7 @@ go 1.25.5
 require (
 	github.com/BurntSushi/toml v1.5.0
 	github.com/container-storage-interface/spec v1.12.0
-	github.com/containerd/containerd/v2 v2.1.2
+	github.com/containerd/containerd/v2 v2.2.1-0.20251210152827-505478250fa0
 	github.com/distribution/reference v0.6.0
 	github.com/kubernetes-csi/csi-lib-utils v0.23.0
 	github.com/mitchellh/go-ps v1.0.0
