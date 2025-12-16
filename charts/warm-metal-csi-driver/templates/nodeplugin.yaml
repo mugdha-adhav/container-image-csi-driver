@@ -197,6 +197,7 @@ spec:
             path: /proc
             type: Directory
           name: host-proc
+        {{- end }}
         {{- if .Values.imageCredentialProvider.enabled }}
         - name: credential-provider-config
           hostPath:
