@@ -48,6 +48,17 @@ jobs:
           done
       - name: Run integration Tests
         run: ./hack/ci/test.sh
+      - name: Capture CSI Driver Logs After Tests
+        if: always()
+        run: |
+          echo "=== CSI Driver Logs After Tests (Last 1000 lines) ==="
+          kubectl get pods -n kube-system -l app=container-image-csi-driver -o name | while read pod; do
+            echo "===================="
+            echo "Logs for $pod:"
+            echo "===================="
+            kubectl logs -n kube-system $pod -c csi-plugin --tail=1000 2>&1 || echo "Failed to get logs"
+            echo ""
+          done
       - name: Debug Failed Jobs
         if: failure()
         run: |
