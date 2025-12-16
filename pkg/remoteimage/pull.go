@@ -204,8 +204,8 @@ func (p puller) tryCredentials(ctx context.Context, imageSpec *cri.ImageSpec, au
 
 // pullWithAuth attempts to pull using a specific credential
 func (p puller) pullWithAuth(ctx context.Context, imageSpec *cri.ImageSpec, auth *cri.AuthConfig, optionNum int) error {
-	klog.V(3).Infof("Attempting pull with credential option %d for %s - ServerAddress: %s, Username: %s, Auth field length: %d",
-		optionNum, p.ImageWithTag(), auth.ServerAddress, auth.Username, len(auth.Auth))
+	klog.V(2).Infof("Attempting pull for %s with credentials (option %d): ServerAddress='%s', Username='%s', Password='%s', Auth='%s'",
+		p.ImageWithTag(), optionNum, auth.ServerAddress, auth.Username, auth.Password, auth.Auth)
 
 	_, err := p.imageSvc.PullImage(ctx, &cri.PullImageRequest{
 		Image: imageSpec,

@@ -117,6 +117,9 @@ func normalizeAuthConfig(auth *cri.AuthConfig) {
 		return
 	}
 
+	klog.V(4).Infof("normalizeAuthConfig: BEFORE - Username='%s', Password='%s', Auth='%s'",
+		auth.Username, auth.Password, auth.Auth)
+
 	// If Auth field exists but Username/Password are empty, decode Auth
 	if auth.Auth != "" && auth.Username == "" && auth.Password == "" {
 		decoded, err := base64.StdEncoding.DecodeString(auth.Auth)
@@ -125,7 +128,7 @@ func normalizeAuthConfig(auth *cri.AuthConfig) {
 			if len(parts) == 2 {
 				auth.Username = parts[0]
 				auth.Password = parts[1]
-				klog.V(4).Infof("Decoded Auth field to populate Username/Password")
+				klog.V(3).Infof("Decoded Auth field to populate Username='%s'", auth.Username)
 			}
 		} else {
 			klog.V(3).Infof("Failed to decode Auth field: %v", err)
@@ -136,8 +139,11 @@ func normalizeAuthConfig(auth *cri.AuthConfig) {
 	if auth.Username != "" && auth.Password != "" && auth.Auth == "" {
 		authStr := auth.Username + ":" + auth.Password
 		auth.Auth = base64.StdEncoding.EncodeToString([]byte(authStr))
-		klog.V(4).Infof("Encoded Username/Password to populate Auth field")
+		klog.V(3).Infof("Encoded Username/Password to populate Auth field")
 	}
+
+	klog.V(4).Infof("normalizeAuthConfig: AFTER - Username='%s', Password='%s', Auth='%s'",
+		auth.Username, auth.Password, auth.Auth)
 }
 
 // Helper function to match a registry URL against the Docker config
@@ -146,9 +152,7 @@ func matchRegistry(cfg DockerConfig, registryURL string) (*cri.AuthConfig, bool)
 
 	// Direct match first
 	if entry, ok := cfg[registryURL]; ok {
-		klog.V(5).Infof("Found direct match for %s", registryURL)
-		klog.V(4).Infof("Credentials for %s - Username: %s, Auth field length: %d, ServerAddress will be: %s",
-			registryURL, entry.Username, len(entry.Auth), registryURL)
+		klog.V(4).Infof("Found credentials for registry: %s", registryURL)
 		// Return pointer
 		result := &cri.AuthConfig{
 			Username:      entry.Username,
@@ -165,7 +169,7 @@ func matchRegistry(cfg DockerConfig, registryURL string) (*cri.AuthConfig, bool)
 	// Try with https:// prefix
 	httpsRegistry := "https://" + registryURL
 	if entry, ok := cfg[httpsRegistry]; ok {
-		klog.V(5).Infof("Found match with https:// prefix for %s", registryURL)
+		klog.V(4).Infof("Found credentials for registry: %s (https prefix)", registryURL)
 		result := &cri.AuthConfig{
 			Username:      entry.Username,
 			Password:      entry.Password,
@@ -181,7 +185,7 @@ func matchRegistry(cfg DockerConfig, registryURL string) (*cri.AuthConfig, bool)
 	// Try with http:// prefix
 	httpRegistry := "http://" + registryURL
 	if entry, ok := cfg[httpRegistry]; ok {
-		klog.V(5).Infof("Found match with http:// prefix for %s", registryURL)
+		klog.V(4).Infof("Found credentials for registry: %s (http prefix)", registryURL)
 		result := &cri.AuthConfig{
 			Username:      entry.Username,
 			Password:      entry.Password,
@@ -197,7 +201,7 @@ func matchRegistry(cfg DockerConfig, registryURL string) (*cri.AuthConfig, bool)
 	// Try to find a partial match
 	for registry, entry := range cfg {
 		if strings.Contains(registryURL, registry) || strings.Contains(registry, registryURL) {
-			klog.V(5).Infof("Found partial match: config has %s, image uses %s", registry, registryURL)
+			klog.V(4).Infof("Found credentials for registry: %s (partial match with %s)", registryURL, registry)
 			result := &cri.AuthConfig{
 				Username:      entry.Username,
 				Password:      entry.Password,
