@@ -153,12 +153,12 @@ func matchRegistry(cfg DockerConfig, registryURL string) (*cri.AuthConfig, bool)
 	// Direct match first
 	if entry, ok := cfg[registryURL]; ok {
 		klog.V(4).Infof("Found credentials for registry: %s", registryURL)
-		// Return pointer
+		// Return pointer - leave ServerAddress empty to let containerd handle registry matching
 		result := &cri.AuthConfig{
 			Username:      entry.Username,
 			Password:      entry.Password,
 			Auth:          entry.Auth,
-			ServerAddress: registryURL,
+			ServerAddress: "",
 			IdentityToken: entry.IdentityToken,
 			RegistryToken: entry.RegistryToken,
 		}
@@ -174,7 +174,7 @@ func matchRegistry(cfg DockerConfig, registryURL string) (*cri.AuthConfig, bool)
 			Username:      entry.Username,
 			Password:      entry.Password,
 			Auth:          entry.Auth,
-			ServerAddress: registryURL,
+			ServerAddress: "",
 			IdentityToken: entry.IdentityToken,
 			RegistryToken: entry.RegistryToken,
 		}
@@ -190,7 +190,7 @@ func matchRegistry(cfg DockerConfig, registryURL string) (*cri.AuthConfig, bool)
 			Username:      entry.Username,
 			Password:      entry.Password,
 			Auth:          entry.Auth,
-			ServerAddress: registryURL,
+			ServerAddress: "",
 			IdentityToken: entry.IdentityToken,
 			RegistryToken: entry.RegistryToken,
 		}
@@ -206,7 +206,7 @@ func matchRegistry(cfg DockerConfig, registryURL string) (*cri.AuthConfig, bool)
 				Username:      entry.Username,
 				Password:      entry.Password,
 				Auth:          entry.Auth,
-				ServerAddress: registryURL,
+				ServerAddress: "",
 				IdentityToken: entry.IdentityToken,
 				RegistryToken: entry.RegistryToken,
 			}
