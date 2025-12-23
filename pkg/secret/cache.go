@@ -15,9 +15,10 @@ import (
 	"k8s.io/klog/v2"
 )
 
-// Store is an interface for retrieving Docker credentials.
+// Store provides access to container registry credentials
 type Store interface {
-	GetDockerKeyring(ctx context.Context, secrets map[string]string, namespace, serviceAccount string) (DockerKeyring, error)
+	// GetDockerKeyring returns a keyring with credentials from all available sources
+	GetDockerKeyring(ctx context.Context, secretData map[string]string) (DockerKeyring, error)
 }
 
 // secretDataWrapper abstracts data access for both byte slices and strings
@@ -139,21 +140,14 @@ type credentialStore struct {
 	client         *kubernetes.Clientset
 }
 
-// GetDockerKeyring returns credentials from volume context, Kubernetes secrets, and plugins
-func (s credentialStore) GetDockerKeyring(ctx context.Context, secretData map[string]string, namespace, serviceAccount string) (DockerKeyring, error) {
-	if namespace != "" && serviceAccount != "" {
-		klog.V(2).Infof("GetDockerKeyring: fetching credentials for pod SA %s/%s", namespace, serviceAccount)
-	} else {
-		klog.V(2).Info("GetDockerKeyring: no pod SA info provided, using driver SA only")
-	}
-
-	keyrings := s.collectKeyrings(ctx, secretData, namespace, serviceAccount)
-
+// GetDockerKeyring returns credentials from volume context, driver SA secrets, and plugins
+func (s credentialStore) GetDockerKeyring(ctx context.Context, secretData map[string]string) (DockerKeyring, error) {
+	keyrings := s.collectKeyrings(ctx, secretData)
 	return s.createUnionKeyring(keyrings), nil
 }
 
 // collectKeyrings gathers credentials from all available sources in priority order
-func (s credentialStore) collectKeyrings(ctx context.Context, secretData map[string]string, namespace, serviceAccount string) []DockerKeyring {
+func (s credentialStore) collectKeyrings(ctx context.Context, secretData map[string]string) []DockerKeyring {
 	var keyrings []DockerKeyring
 
 	// 1. Volume context secrets (highest priority - pod-specific, inline)
@@ -165,38 +159,7 @@ func (s credentialStore) collectKeyrings(ctx context.Context, secretData map[str
 		}
 	}
 
-	// 2. Pod's service account imagePullSecrets
-	if s.client != nil && namespace != "" && serviceAccount != "" {
-		sa, err := s.client.CoreV1().ServiceAccounts(namespace).Get(ctx, serviceAccount, metav1.GetOptions{})
-		if err != nil {
-			klog.Warningf("unable to fetch service account %s/%s: %s", namespace, serviceAccount, err)
-		} else {
-			secrets := make([]corev1.Secret, 0, len(sa.ImagePullSecrets))
-			klog.V(2).Infof("got %d imagePullSecrets from pod's service account %s/%s", len(sa.ImagePullSecrets), namespace, serviceAccount)
-
-			for i := range sa.ImagePullSecrets {
-				secretRef := &sa.ImagePullSecrets[i]
-				secret, err := s.client.CoreV1().Secrets(namespace).Get(ctx, secretRef.Name, metav1.GetOptions{})
-				if err != nil {
-					klog.Errorf("unable to fetch secret %s/%s: %s", namespace, secretRef.Name, err)
-					continue
-				}
-				secrets = append(secrets, *secret)
-			}
-
-			if len(secrets) > 0 {
-				podSAKeyring, err := makeDockerKeyringFromSecrets(secrets)
-				if err != nil {
-					klog.Errorf("unable to create keyring from pod SA secrets: %s", err)
-				} else {
-					klog.V(2).Infof("created keyring from %d pod SA secrets", len(secrets))
-					keyrings = append(keyrings, podSAKeyring)
-				}
-			}
-		}
-	}
-
-	// 3. Driver's service account secrets (cluster-wide)
+	// 2. Driver's service account secrets (cluster-wide)
 	if s.secretsFetcher != nil {
 		secretKeyring, err := s.secretsFetcher.GetKeyring(ctx)
 		if err == nil && secretKeyring != nil {
@@ -205,7 +168,7 @@ func (s credentialStore) collectKeyrings(ctx context.Context, secretData map[str
 		}
 	}
 
-	// 4. Credential provider plugins (if enabled)
+	// 3. Credential provider plugins (if enabled)
 	if s.pluginsEnabled {
 		keyrings = append(keyrings, &pluginDockerKeyring{})
 		klog.V(3).Info("Added plugin credentials to keyring")

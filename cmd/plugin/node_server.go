@@ -129,11 +129,7 @@ func (n NodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublishV
 
 	pullAlways := strings.ToLower(req.VolumeContext[ctxKeyPullAlways]) == "true"
 
-	// Extract pod service account information for fetching imagePullSecrets
-	podNamespace := req.VolumeContext["csi.storage.k8s.io/pod.namespace"]
-	podServiceAccount := req.VolumeContext["csi.storage.k8s.io/serviceAccount.name"]
-
-	keyring, err := n.secretStore.GetDockerKeyring(ctx, req.Secrets, podNamespace, podServiceAccount)
+	keyring, err := n.secretStore.GetDockerKeyring(ctx, req.Secrets)
 	if err != nil {
 		err = status.Errorf(codes.Aborted, "unable to fetch keyring: %s", err)
 		return

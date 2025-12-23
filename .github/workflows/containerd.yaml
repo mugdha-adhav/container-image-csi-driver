@@ -49,7 +49,7 @@ jobs:
       - name: Run integration Tests
         run: ./hack/ci/test.sh
       - name: Debug Failed Jobs
-        if: failure()
+        #if: failure()
         run: |
           echo "=== Failed Job Details ==="
           kubectl get jobs -o wide
