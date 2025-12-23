@@ -485,16 +485,18 @@ func callCustomPlugin(plugin PluginConfig, image string) (*cri.AuthConfig, error
 		return nil, fmt.Errorf("failed to execute plugin %s: %w", plugin.Name, err)
 	}
 
-	return parseCredentialProviderResponse(plugin.Name, output)
+	return parseCredentialProviderResponse(plugin.Name, output, image)
 }
 
 // parseCustomPluginOutput processes the output from a custom credential plugin
 func parseCustomPluginOutput(pluginName string, output []byte) (*cri.AuthConfig, error) {
-	return parseCredentialProviderResponse(pluginName, output)
+	// Note: This function is deprecated and kept for backwards compatibility
+	// It doesn't have access to the image parameter, so ServerAddress won't be set
+	return parseCredentialProviderResponse(pluginName, output, "")
 }
 
 // parseCredentialProviderResponse parses the Kubernetes credential provider plugin response
-func parseCredentialProviderResponse(pluginName string, output []byte) (*cri.AuthConfig, error) {
+func parseCredentialProviderResponse(pluginName string, output []byte, image string) (*cri.AuthConfig, error) {
 	// Don't log output details as they may contain credentials
 	klog.V(4).Infof("Plugin %s returned output", pluginName)
 
@@ -520,6 +522,20 @@ func parseCredentialProviderResponse(pluginName string, output []byte) (*cri.Aut
 		return nil, nil
 	}
 
+	// Extract server URL from the image if available
+	var serverURL string
+	if image != "" {
+		var err error
+		serverURL, err = extractServerURL(image)
+		if err != nil {
+			klog.V(2).Infof("Failed to extract server URL from image %s: %v", image, err)
+		} else {
+			// Remove https:// prefix for ServerAddress field
+			serverURL = strings.TrimPrefix(serverURL, "https://")
+			klog.V(4).Infof("Extracted server URL: %s from image: %s", serverURL, image)
+		}
+	}
+
 	// Get the first (and typically only) auth entry
 	// The key is typically the registry pattern (e.g., "*.dkr.ecr.*.amazonaws.com")
 	for registry, auth := range response.Auth {
@@ -530,9 +546,10 @@ func parseCredentialProviderResponse(pluginName string, output []byte) (*cri.Aut
 		authEncoded := base64.StdEncoding.EncodeToString([]byte(authStr))
 
 		return &cri.AuthConfig{
-			Username: auth.Username,
-			Password: auth.Password,
-			Auth:     authEncoded,
+			Username:      auth.Username,
+			Password:      auth.Password,
+			Auth:          authEncoded,
+			ServerAddress: serverURL, // CRITICAL: Set ServerAddress so CRI can match credentials to registry
 		}, nil
 	}
 
