@@ -58,7 +58,10 @@ type DockerCredentialHelperOutput struct {
 }
 
 var (
-	// registeredPlugins contains the list of registered plugins
+	// registeredPlugins contains the list of registered plugins.
+	// The lock protects read/write access to the map itself.
+	// Plugin execution is not synchronized - plugins should be stateless and thread-safe
+	// as multiple goroutines may call the same plugin concurrently for different images.
 	registeredPlugins     = make(map[string]PluginConfig)
 	registeredPluginsLock sync.RWMutex
 )
@@ -125,6 +128,10 @@ func RegisterCredentialProviderPlugins(configFilePath, executableDir string) err
 }
 
 // GetCredentialFromPlugin attempts to get credentials from registered plugins
+// GetCredentialFromPlugin attempts to retrieve credentials for an image from registered plugins.
+// Returns the first matching credential or nil if no plugin can provide credentials.
+// This function is thread-safe and may be called concurrently for different images.
+// Plugins are executed sequentially in registration order until one returns credentials.
 func GetCredentialFromPlugin(image string) (*cri.AuthConfig, error) {
 	registeredPluginsLock.RLock()
 	defer registeredPluginsLock.RUnlock()
@@ -389,7 +396,8 @@ func executeCredentialHelper(plugin PluginConfig, serverURL string) ([]byte, str
 		return nil, stderr.String(), fmt.Errorf("failed to start: %w", err)
 	}
 
-	// Write server URL to stdin
+	// Write server URL to stdin followed by newline as required by Docker credential helper protocol
+	// See: https://github.com/docker/docker-credential-helpers#development
 	if _, err := stdin.Write([]byte(serverURL + "\n")); err != nil {
 		_ = cmd.Process.Kill() // Kill process on error
 		return nil, stderr.String(), fmt.Errorf("failed to write to stdin: %w", err)
@@ -398,7 +406,11 @@ func executeCredentialHelper(plugin PluginConfig, serverURL string) ([]byte, str
 
 	// Wait for the command to complete
 	if err := cmd.Wait(); err != nil {
-		return nil, stderr.String(), err
+		// Include stderr in error for better debugging
+		if stderr.String() != "" {
+			return nil, stderr.String(), fmt.Errorf("plugin execution failed: %w (stderr: %s)", err, stderr.String())
+		}
+		return nil, stderr.String(), fmt.Errorf("plugin execution failed: %w", err)
 	}
 
 	return []byte(stdout.String()), stderr.String(), nil

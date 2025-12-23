@@ -152,7 +152,9 @@ func (s credentialStore) collectKeyrings(ctx context.Context, secretData map[str
 	// 1. Volume context secrets (highest priority - pod-specific, inline)
 	if len(secretData) > 0 {
 		volumeKeyring, err := makeDockerKeyringFromMap(secretData)
-		if err == nil && volumeKeyring != nil {
+		if err != nil {
+			klog.V(3).Infof("Failed to create keyring from volume context: %v", err)
+		} else if volumeKeyring != nil {
 			keyrings = append(keyrings, volumeKeyring)
 			klog.V(3).Info("Added volume context credentials to keyring")
 		}
@@ -161,7 +163,9 @@ func (s credentialStore) collectKeyrings(ctx context.Context, secretData map[str
 	// 2. Driver's service account secrets (cluster-wide)
 	if s.secretsFetcher != nil {
 		secretKeyring, err := s.secretsFetcher.GetKeyring(ctx)
-		if err == nil && secretKeyring != nil {
+		if err != nil {
+			klog.V(3).Infof("Failed to get driver SA credentials: %v", err)
+		} else if secretKeyring != nil {
 			keyrings = append(keyrings, secretKeyring)
 			klog.V(3).Info("Added driver SA credentials to keyring")
 		}

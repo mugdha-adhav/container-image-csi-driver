@@ -143,6 +143,11 @@ func normalizeAuthConfig(auth *cri.AuthConfig) {
 }
 
 // Helper function to match a registry URL against the Docker config
+// Returns a new AuthConfig with ServerAddress set to empty string.
+// IMPORTANT: ServerAddress must be empty to allow containerd's CRI implementation
+// to match credentials based on the image reference registry. If ServerAddress is set,
+// containerd will try to match it exactly, which fails for registry patterns like
+// "*.dkr.ecr.*.amazonaws.com" that don't match the actual registry URL.
 func matchRegistry(cfg DockerConfig, registryURL string) (*cri.AuthConfig, bool) {
 
 	// Direct match first
