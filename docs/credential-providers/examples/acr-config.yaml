@@ -37,7 +37,9 @@ providers:
 # Installation Steps:
 #
 # 1. Download and install the ACR credential provider:
-#    sudo wget https://github.com/kubernetes/cloud-provider-azure/releases/download/v1.28.0/acr-credential-provider-linux-amd64 \
+#    ACR_PROVIDER_VERSION=v1.31.3  # Use the version matching your Kubernetes version
+#    ARCH=amd64  # or arm64
+#    sudo wget https://storage.googleapis.com/k8s-artifacts-prod/binaries/cloud-provider-azure/${ACR_PROVIDER_VERSION}/linux/${ARCH}/acr-credential-provider-linux-${ARCH} \
 #      -O /etc/kubernetes/image-credential-providers/acr-credential-provider
 #    sudo chmod +x /etc/kubernetes/image-credential-providers/acr-credential-provider
 #

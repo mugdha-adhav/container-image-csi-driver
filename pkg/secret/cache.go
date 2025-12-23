@@ -68,10 +68,9 @@ func parseDockerConfigJSON(data []byte) (DockerConfig, error) {
 		return nil, fmt.Errorf("error parsing .dockerconfigjson: %w", err)
 	}
 
-	// Log what we parsed
-	for registry, auth := range dockerConfigJSON.Auths {
-		klog.V(4).Infof("Parsed credentials for registry %s: Username='%s', Password='%s', Auth='%s'",
-			registry, auth.Username, auth.Password, auth.Auth)
+	// Log credential sources found
+	if len(dockerConfigJSON.Auths) > 0 {
+		klog.V(3).Infof("Parsed credentials for %d registries from .dockerconfigjson", len(dockerConfigJSON.Auths))
 	}
 
 	return dockerConfigJSON.Auths, nil

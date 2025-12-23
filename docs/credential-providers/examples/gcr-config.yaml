@@ -34,7 +34,9 @@ providers:
 # Installation Steps:
 #
 # 1. Download and install the GCP credential provider:
-#    sudo wget https://github.com/kubernetes/cloud-provider-gcp/releases/download/v1.28.0/gcp-credential-provider-linux-amd64 \
+#    GCP_PROVIDER_VERSION=v1.31.3  # Use the version matching your Kubernetes version
+#    ARCH=amd64  # or arm64
+#    sudo wget https://storage.googleapis.com/k8s-artifacts-prod/binaries/cloud-provider-gcp/${GCP_PROVIDER_VERSION}/linux/${ARCH}/gcp-credential-provider-linux-${ARCH} \
 #      -O /etc/kubernetes/image-credential-providers/gcp-credential-provider
 #    sudo chmod +x /etc/kubernetes/image-credential-providers/gcp-credential-provider
 #

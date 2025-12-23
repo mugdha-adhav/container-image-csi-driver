@@ -56,22 +56,40 @@ Choose the appropriate method for your cloud provider:
 
 #### AWS ECR
 ```bash
+# Set version matching your Kubernetes version and architecture
+PROVIDER_VERSION="v1.31.3"  # Example: v1.31.3 for Kubernetes 1.31.x
+ARCH="amd64"  # or "arm64"
+
 # Download and install ecr-credential-provider
-sudo wget https://github.com/kubernetes/cloud-provider-aws/releases/download/v1.28.0/ecr-credential-provider-linux-amd64 -O /etc/kubernetes/image-credential-providers/ecr-credential-provider
+sudo mkdir -p /etc/kubernetes/image-credential-providers
+sudo wget "https://storage.googleapis.com/k8s-artifacts-prod/binaries/cloud-provider-aws/${PROVIDER_VERSION}/linux/${ARCH}/ecr-credential-provider-linux-${ARCH}" \
+  -O /etc/kubernetes/image-credential-providers/ecr-credential-provider
 sudo chmod +x /etc/kubernetes/image-credential-providers/ecr-credential-provider
 ```
 
 #### Google GCR
 ```bash
+# Set version matching your Kubernetes version and architecture
+PROVIDER_VERSION="v1.31.3"  # Example: v1.31.3 for Kubernetes 1.31.x
+ARCH="amd64"  # or "arm64"
+
 # Download and install gcp-credential-provider
-sudo wget https://github.com/kubernetes/cloud-provider-gcp/releases/download/v1.28.0/gcp-credential-provider-linux-amd64 -O /etc/kubernetes/image-credential-providers/gcp-credential-provider
+sudo mkdir -p /etc/kubernetes/image-credential-providers
+sudo wget "https://storage.googleapis.com/k8s-artifacts-prod/binaries/cloud-provider-gcp/${PROVIDER_VERSION}/linux/${ARCH}/gcp-credential-provider-linux-${ARCH}" \
+  -O /etc/kubernetes/image-credential-providers/gcp-credential-provider
 sudo chmod +x /etc/kubernetes/image-credential-providers/gcp-credential-provider
 ```
 
 #### Azure ACR
 ```bash
+# Set version matching your Kubernetes version and architecture
+PROVIDER_VERSION="v1.31.3"  # Example: v1.31.3 for Kubernetes 1.31.x
+ARCH="amd64"  # or "arm64"
+
 # Download and install acr-credential-provider
-sudo wget https://github.com/kubernetes/cloud-provider-azure/releases/download/v1.28.0/acr-credential-provider-linux-amd64 -O /etc/kubernetes/image-credential-providers/acr-credential-provider
+sudo mkdir -p /etc/kubernetes/image-credential-providers
+sudo wget "https://storage.googleapis.com/k8s-artifacts-prod/binaries/cloud-provider-azure/${PROVIDER_VERSION}/linux/${ARCH}/acr-credential-provider-linux-${ARCH}" \
+  -O /etc/kubernetes/image-credential-providers/acr-credential-provider
 sudo chmod +x /etc/kubernetes/image-credential-providers/acr-credential-provider
 ```
 
@@ -128,13 +146,6 @@ kubectl exec -n kube-system daemonset/warm-metal-csi-driver-nodeplugin -c csi-pl
 kubectl logs -n kube-system daemonset/warm-metal-csi-driver-nodeplugin -c csi-plugin | grep -i credential
 ```
 
-## Detailed Guides
-
-- [ECR Setup Guide](./ecr-setup.md) - Complete setup for AWS ECR
-- [GCR Setup Guide](./gcr-setup.md) - Complete setup for Google GCR
-- [ACR Setup Guide](./acr-setup.md) - Complete setup for Azure ACR
-- [Multi-Cloud Setup](./multi-cloud-setup.md) - Using multiple providers
-
 ## Configuration Examples
 
 See the [examples/](./examples/) directory for complete configuration examples:
@@ -155,8 +166,12 @@ The CSI driver also supports standard Docker credential helpers (e.g., `docker-c
    # On Amazon Linux / AL2023
    sudo yum install -y amazon-ecr-credential-helper
 
-   # Or download binary
-   sudo wget https://amazon-ecr-credential-helper-releases.s3.us-east-2.amazonaws.com/0.8.0/linux-amd64/docker-credential-ecr-login -O /etc/kubernetes/image-credential-providers/docker-credential-ecr-login
+   # Or download binary (replace VERSION with latest, e.g., 0.8.0)
+   VERSION="0.8.0"
+   ARCH="amd64"  # or "arm64"
+   sudo mkdir -p /etc/kubernetes/image-credential-providers
+   sudo wget "https://amazon-ecr-credential-helper-releases.s3.us-east-2.amazonaws.com/${VERSION}/linux-${ARCH}/docker-credential-ecr-login" \
+     -O /etc/kubernetes/image-credential-providers/docker-credential-ecr-login
    sudo chmod +x /etc/kubernetes/image-credential-providers/docker-credential-ecr-login
    ```
 
@@ -296,11 +311,13 @@ The credential provider plugin system in this CSI driver:
 
 - Supports both Kubernetes credential provider plugins and Docker credential helpers
 - Caches credentials to minimize API calls to cloud providers
-- Falls back to Kubernetes secrets if no credential provider matches
+- Combines credentials from all available sources (credentials from multiple sources are merged)
 - Prioritizes credentials in this order:
-  1. Volume context secrets (pod-specific)
-  2. Kubernetes secrets (cluster-wide)
-  3. Credential provider plugins
+  1. Volume context secrets (highest priority - pod-specific, passed via `nodePublishSecretRef`)
+  2. Driver's ServiceAccount imagePullSecrets (cluster-wide, configured in the driver's SA)
+  3. Credential provider plugins (if enabled - ECR/GCR/ACR/etc.)
+
+When pulling an image, the driver searches through all sources in priority order and uses the first matching credentials for the target registry.
 
 ## References
 

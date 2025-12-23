@@ -53,18 +53,22 @@ providers:
 #
 # 1. Install all credential provider binaries:
 #
+#    # Set version and architecture variables
+#    PROVIDER_VERSION=v1.31.3  # Use the version matching your Kubernetes version
+#    ARCH=amd64  # or arm64
+#
 #    # AWS ECR
-#    sudo wget https://github.com/kubernetes/cloud-provider-aws/releases/download/v1.28.0/ecr-credential-provider-linux-amd64 \
+#    sudo wget https://storage.googleapis.com/k8s-artifacts-prod/binaries/cloud-provider-aws/${PROVIDER_VERSION}/linux/${ARCH}/ecr-credential-provider-linux-${ARCH} \
 #      -O /etc/kubernetes/image-credential-providers/ecr-credential-provider
 #    sudo chmod +x /etc/kubernetes/image-credential-providers/ecr-credential-provider
 #
 #    # Google GCR
-#    sudo wget https://github.com/kubernetes/cloud-provider-gcp/releases/download/v1.28.0/gcp-credential-provider-linux-amd64 \
+#    sudo wget https://storage.googleapis.com/k8s-artifacts-prod/binaries/cloud-provider-gcp/${PROVIDER_VERSION}/linux/${ARCH}/gcp-credential-provider-linux-${ARCH} \
 #      -O /etc/kubernetes/image-credential-providers/gcp-credential-provider
 #    sudo chmod +x /etc/kubernetes/image-credential-providers/gcp-credential-provider
 #
 #    # Azure ACR
-#    sudo wget https://github.com/kubernetes/cloud-provider-azure/releases/download/v1.28.0/acr-credential-provider-linux-amd64 \
+#    sudo wget https://storage.googleapis.com/k8s-artifacts-prod/binaries/cloud-provider-azure/${PROVIDER_VERSION}/linux/${ARCH}/acr-credential-provider-linux-${ARCH} \
 #      -O /etc/kubernetes/image-credential-providers/acr-credential-provider
 #    sudo chmod +x /etc/kubernetes/image-credential-providers/acr-credential-provider
 #

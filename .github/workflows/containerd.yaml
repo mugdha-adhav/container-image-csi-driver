@@ -48,8 +48,8 @@ jobs:
           done
       - name: Run integration Tests
         run: ./hack/ci/test.sh
-      - name: Debug Failed Jobs
-        #if: failure()
+      - name: Debug Driver and Test Status
+        if: always()
         run: |
           echo "=== Failed Job Details ==="
           kubectl get jobs -o wide
