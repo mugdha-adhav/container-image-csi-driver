@@ -81,11 +81,11 @@ func mountInHostNamespace(ctx context.Context, mounts []mount.Mount, target stri
 	klog.V(4).Infof("executing batch mount with %d commands using nsenter", len(mounts))
 
 	// Execute all mounts in a single nsenter call
-	// Use /bin/sh explicitly to ensure compatibility with Bottlerocket
+	// Note: nsenter expects just the command name (sh), not the full path (/bin/sh)
 	cmd := exec.CommandContext(ctx, "nsenter",
 		"--mount=/host/proc/1/ns/mnt",
 		"--",
-		"/bin/sh", "-c", script)
+		"sh", "-c", script)
 
 	output, err := cmd.CombinedOutput()
 	if err != nil {
