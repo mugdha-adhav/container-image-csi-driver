@@ -36,37 +36,63 @@ func NewMounter(socketPath string) backend.Mounter {
 	})
 }
 
+// shellQuote escapes a string for safe use in shell commands
+// Uses POSIX-compliant single-quote escaping
+func shellQuote(s string) string {
+	// Single quotes protect all characters except single quote itself
+	// To include a single quote: end quote, add escaped quote, start quote
+	// Example: "it's" becomes 'it'"'"'s'
+	return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'"
+}
+
 // mountInHostNamespace mounts directly in the host mount namespace using nsenter
+// Uses batched approach: executes all mount commands in a single nsenter invocation
 func mountInHostNamespace(ctx context.Context, mounts []mount.Mount, target string) error {
-	// For each mount, execute it in the host namespace
+	if len(mounts) == 0 {
+		return nil
+	}
+
+	// Build a shell script with all mount commands
+	var scriptBuilder strings.Builder
+	scriptBuilder.WriteString("set -e\n") // Exit on first error
+
 	for i, m := range mounts {
-		var args []string
+		var mountCmd strings.Builder
+		mountCmd.WriteString("mount")
 
 		// Only add -t flag if type is specified
 		if m.Type != "" {
-			args = append(args, "-t", m.Type)
+			mountCmd.WriteString(fmt.Sprintf(" -t %s", shellQuote(m.Type)))
 		}
 
 		if len(m.Options) > 0 {
-			args = append(args, "-o", strings.Join(m.Options, ","))
+			mountCmd.WriteString(fmt.Sprintf(" -o %s", shellQuote(strings.Join(m.Options, ","))))
 		}
 
-		args = append(args, m.Source, target)
+		mountCmd.WriteString(fmt.Sprintf(" %s %s", shellQuote(m.Source), shellQuote(target)))
 
-		// Build the nsenter command
-		nsenterArgs := []string{"--mount=/host/proc/1/ns/mnt", "--", "mount"}
-		nsenterArgs = append(nsenterArgs, args...)
+		scriptBuilder.WriteString(mountCmd.String())
+		scriptBuilder.WriteString("\n")
 
-		cmd := exec.CommandContext(ctx, "nsenter", nsenterArgs...)
-		output, err := cmd.CombinedOutput()
-		if err != nil {
-			klog.Errorf("nsenter mount failed (attempt %d/%d): %s, output: %s, command: %v",
-				i+1, len(mounts), err, string(output), cmd.Args)
-			return fmt.Errorf("mount failed: %w, output: %s", err, string(output))
-		}
-		klog.V(4).Infof("mounted %s to %s with type %s and options %v using nsenter (mount %d/%d)",
-			m.Source, target, m.Type, m.Options, i+1, len(mounts))
+		klog.V(5).Infof("batch mount command %d/%d: %s", i+1, len(mounts), mountCmd.String())
 	}
+
+	script := scriptBuilder.String()
+	klog.V(4).Infof("executing batch mount with %d commands using nsenter", len(mounts))
+
+	// Execute all mounts in a single nsenter call
+	cmd := exec.CommandContext(ctx, "nsenter",
+		"--mount=/host/proc/1/ns/mnt",
+		"--",
+		"sh", "-c", script)
+
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		klog.Errorf("batch nsenter mount failed: %s, output: %s, script:\n%s", err, string(output), script)
+		return fmt.Errorf("batch mount failed: %w, output: %s", err, string(output))
+	}
+
+	klog.V(4).Infof("successfully mounted %d layers to %s using batched nsenter", len(mounts), target)
 	return nil
 }
 
