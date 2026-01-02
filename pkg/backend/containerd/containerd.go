@@ -53,38 +53,39 @@ func mountInHostNamespace(ctx context.Context, mounts []mount.Mount, target stri
 	}
 
 	// Build a shell script with all mount commands
+	// Chain commands with && to stop on first error (instead of set -e which may not work on all shells)
 	var scriptBuilder strings.Builder
-	scriptBuilder.WriteString("set -e\n") // Exit on first error
 
 	for i, m := range mounts {
-		var mountCmd strings.Builder
-		mountCmd.WriteString("mount")
+		if i > 0 {
+			scriptBuilder.WriteString(" && ")
+		}
+
+		scriptBuilder.WriteString("mount")
 
 		// Only add -t flag if type is specified
 		if m.Type != "" {
-			mountCmd.WriteString(fmt.Sprintf(" -t %s", shellQuote(m.Type)))
+			scriptBuilder.WriteString(fmt.Sprintf(" -t %s", shellQuote(m.Type)))
 		}
 
 		if len(m.Options) > 0 {
-			mountCmd.WriteString(fmt.Sprintf(" -o %s", shellQuote(strings.Join(m.Options, ","))))
+			scriptBuilder.WriteString(fmt.Sprintf(" -o %s", shellQuote(strings.Join(m.Options, ","))))
 		}
 
-		mountCmd.WriteString(fmt.Sprintf(" %s %s", shellQuote(m.Source), shellQuote(target)))
+		scriptBuilder.WriteString(fmt.Sprintf(" %s %s", shellQuote(m.Source), shellQuote(target)))
 
-		scriptBuilder.WriteString(mountCmd.String())
-		scriptBuilder.WriteString("\n")
-
-		klog.V(5).Infof("batch mount command %d/%d: %s", i+1, len(mounts), mountCmd.String())
+		klog.V(5).Infof("batch mount command %d/%d", i+1, len(mounts))
 	}
 
 	script := scriptBuilder.String()
 	klog.V(4).Infof("executing batch mount with %d commands using nsenter", len(mounts))
 
 	// Execute all mounts in a single nsenter call
+	// Use /bin/sh explicitly to ensure compatibility with Bottlerocket
 	cmd := exec.CommandContext(ctx, "nsenter",
 		"--mount=/host/proc/1/ns/mnt",
 		"--",
-		"sh", "-c", script)
+		"/bin/sh", "-c", script)
 
 	output, err := cmd.CombinedOutput()
 	if err != nil {
